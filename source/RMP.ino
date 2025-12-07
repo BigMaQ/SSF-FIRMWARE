@@ -100,6 +100,21 @@ volatile unsigned long rotary1LastChangeTime = 0;
 volatile unsigned long rotary2LastChangeTime = 0;
 const unsigned long ROTARY_FAST_THRESHOLD_MS = 50;  // < 50ms between steps = fast turn
 
+// MobiFlight-style rotary encoder configuration
+// Format: 0b<RT2_config><RT1_config> where each is 2 bits:
+// 00 = No sensitivity (all transitions), 01 = Low (half-step), 10 = Medium (detent), 11 = High (strict)
+uint8_t ROTARY_CONFIG = 0b1010;  // Both encoders: Medium sensitivity (detent mode) - Default 10
+
+// Extract individual configs (updated dynamically)
+uint8_t RT1_SENSITIVITY = (ROTARY_CONFIG >> 0) & 0b11;  // Bits 0-1
+uint8_t RT2_SENSITIVITY = (ROTARY_CONFIG >> 2) & 0b11;  // Bits 2-3
+
+// Configuration parameters (can be changed via CFG: command)
+uint8_t CFG_BUTTON_DEBOUNCE = 12;     // Button debounce time in ms (00-99), default 12ms
+uint16_t CFG_LED_REFRESH = 1200;      // LED refresh interval in ms, default 1200ms
+uint16_t CFG_DISPLAY_REFRESH = 1200;  // Display refresh interval in ms, default 1200ms
+String CFG_AIRCRAFT_REG = "SSFA320";  // Aircraft registration, default SSFA320, max 8 chars
+
 // ============================================================================
 // TIMING / THROTTLES / DEBOUNCE
 // ============================================================================
@@ -110,7 +125,7 @@ unsigned long lastSendTs = 0;
 const unsigned long SEND_MIN_INTERVAL_MS = 10;
 
 unsigned long lastDebounceTs = 0;
-const unsigned long DEBOUNCE_MS = 12;
+// DEBOUNCE_MS now uses CFG_BUTTON_DEBOUNCE (set above in config section)
 
 // ============================================================================
 // BOOT / CONNECTION STATE
@@ -344,20 +359,62 @@ void updateRotary1() {
   uint8_t sum = (rotary1LastEncoded << 2) | encoded;
   
   unsigned long now = millis();
-  bool isFast = (now - rotary1LastChangeTime) < ROTARY_FAST_THRESHOLD_MS;
-  int step = isFast ? 2 : 1;
+  int step = 1;  // Always use step = 1 for Fenix compatibility
   
-  // Only process valid state transitions (ignore bounces)
-  if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
+  bool validTransition = false;
+  int direction = 0;
+  
+  // Apply sensitivity pattern based on RT1_SENSITIVITY
+  switch (RT1_SENSITIVITY) {
+    case 0b00:  // No sensitivity - all transitions
+      if (sum == 0b0001 || sum == 0b0111 || sum == 0b1000 || sum == 0b1110) {
+        direction = -1;
+        validTransition = true;
+      }
+      else if (sum == 0b0010 || sum == 0b0100 || sum == 0b1011 || sum == 0b1101) {
+        direction = 1;
+        validTransition = true;
+      }
+      break;
+      
+    case 0b01:  // Low sensitivity - half-step
+      if (sum == 0b0001 || sum == 0b1000) {
+        direction = -1;
+        validTransition = true;
+      }
+      else if (sum == 0b0010 || sum == 0b0100) {
+        direction = 1;
+        validTransition = true;
+      }
+      break;
+      
+    case 0b10:  // Medium sensitivity - detent (MobiFlight standard)
+      if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
+        direction = 1;
+        validTransition = true;
+      }
+      else if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
+        direction = -1;
+        validTransition = true;
+      }
+      break;
+      
+    case 0b11:  // High sensitivity - strict detent only
+      if (sum == 0b1101 || sum == 0b1011) {
+        direction = 1;
+        validTransition = true;
+      }
+      else if (sum == 0b1110 || sum == 0b1000) {
+        direction = -1;
+        validTransition = true;
+      }
+      break;
+  }
+  
+  if (validTransition) {
     // Debounce: only count if enough time passed since last change (2ms minimum)
     if ((now - rotary1LastChangeTime) >= 2 || rotary1LastChangeTime == 0) {
-      rotary1Counter += step;
-      rotary1LastChangeTime = now;
-    }
-  }
-  else if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
-    if ((now - rotary1LastChangeTime) >= 2 || rotary1LastChangeTime == 0) {
-      rotary1Counter -= step;
+      rotary1Counter += (direction * step);
       rotary1LastChangeTime = now;
     }
   }
@@ -372,16 +429,64 @@ void updateRotary2() {
   uint8_t sum = (rotary2LastEncoded << 2) | encoded;
   
   unsigned long now = millis();
-  bool isFast = (now - rotary2LastChangeTime) < ROTARY_FAST_THRESHOLD_MS;
-  int step = isFast ? 2 : 1;
+  int step = 1;  // Always use step = 1 for Fenix compatibility
   
-  if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
-    rotary2Counter += step;
-    rotary2LastChangeTime = now;
+  bool validTransition = false;
+  int direction = 0;
+  
+  // Apply sensitivity pattern based on RT2_SENSITIVITY
+  switch (RT2_SENSITIVITY) {
+    case 0b00:  // No sensitivity - all transitions
+      if (sum == 0b0001 || sum == 0b0111 || sum == 0b1000 || sum == 0b1110) {
+        direction = -1;
+        validTransition = true;
+      }
+      else if (sum == 0b0010 || sum == 0b0100 || sum == 0b1011 || sum == 0b1101) {
+        direction = 1;
+        validTransition = true;
+      }
+      break;
+      
+    case 0b01:  // Low sensitivity - half-step
+      if (sum == 0b0001 || sum == 0b1000) {
+        direction = -1;
+        validTransition = true;
+      }
+      else if (sum == 0b0010 || sum == 0b0100) {
+        direction = 1;
+        validTransition = true;
+      }
+      break;
+      
+    case 0b10:  // Medium sensitivity - detent (MobiFlight standard)
+      if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011) {
+        direction = 1;
+        validTransition = true;
+      }
+      else if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
+        direction = -1;
+        validTransition = true;
+      }
+      break;
+      
+    case 0b11:  // High sensitivity - strict detent only
+      if (sum == 0b1101 || sum == 0b1011) {
+        direction = 1;
+        validTransition = true;
+      }
+      else if (sum == 0b1110 || sum == 0b1000) {
+        direction = -1;
+        validTransition = true;
+      }
+      break;
   }
-  if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000) {
-    rotary2Counter -= step;
-    rotary2LastChangeTime = now;
+  
+  if (validTransition) {
+    // Debounce: only count if enough time passed since last change (2ms minimum)
+    if ((now - rotary2LastChangeTime) >= 2 || rotary2LastChangeTime == 0) {
+      rotary2Counter += (direction * step);
+      rotary2LastChangeTime = now;
+    }
   }
   
   rotary2LastEncoded = encoded;
@@ -393,6 +498,7 @@ void updateRotary2() {
 void sendIdentAndState() {
   Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
   Serial.print(";STATE:RUNNING;");
+  Serial.print("REG:"); Serial.print(CFG_AIRCRAFT_REG); Serial.print(";");
   Serial.println();
 }
 
@@ -488,6 +594,53 @@ void processIncomingLine(const String &line) {
     }
     else if (key.equalsIgnoreCase("VER")) {
       sendIdentAndState();
+    }
+    else if (key.equalsIgnoreCase("CFG")) {
+      // Parse configuration: CFG:ROT1010;DEB15;LED1000;DSP800;REG:D-AIDA
+      String cfgStr = val;
+      int pos = 0;
+      while (pos < cfgStr.length()) {
+        int nextSep = cfgStr.indexOf(';', pos);
+        if (nextSep < 0) nextSep = cfgStr.length();
+        String param = cfgStr.substring(pos, nextSep);
+        param.trim();
+        
+        if (param.startsWith("ROT")) {
+          // ROT followed by 4 binary digits: ROT1010 = 0b1010
+          String rotVal = param.substring(3);
+          if (rotVal.length() >= 4) {
+            uint8_t rt1 = ((rotVal.charAt(2) == '1') ? 2 : 0) | ((rotVal.charAt(3) == '1') ? 1 : 0);
+            uint8_t rt2 = ((rotVal.charAt(0) == '1') ? 2 : 0) | ((rotVal.charAt(1) == '1') ? 1 : 0);
+            ROTARY_CONFIG = (rt2 << 2) | rt1;
+            RT1_SENSITIVITY = rt1;
+            RT2_SENSITIVITY = rt2;
+            Serial.print("CFG:ROTARY=0b"); Serial.println(ROTARY_CONFIG, BIN);
+          }
+        }
+        else if (param.startsWith("DEB")) {
+          // DEB followed by 2 digits (00-99 ms)
+          CFG_BUTTON_DEBOUNCE = constrain(param.substring(3).toInt(), 0, 99);
+          Serial.print("CFG:DEBOUNCE="); Serial.println(CFG_BUTTON_DEBOUNCE);
+        }
+        else if (param.startsWith("LED")) {
+          // LED followed by refresh time in ms
+          CFG_LED_REFRESH = constrain(param.substring(3).toInt(), 100, 10000);
+          Serial.print("CFG:LED_REFRESH="); Serial.println(CFG_LED_REFRESH);
+        }
+        else if (param.startsWith("DSP")) {
+          // DSP followed by refresh time in ms
+          CFG_DISPLAY_REFRESH = constrain(param.substring(3).toInt(), 100, 10000);
+          Serial.print("CFG:DISPLAY_REFRESH="); Serial.println(CFG_DISPLAY_REFRESH);
+        }
+        else if (param.startsWith("REG:")) {
+          // REG: followed by aircraft registration (max 8 chars)
+          CFG_AIRCRAFT_REG = param.substring(4);
+          if (CFG_AIRCRAFT_REG.length() > 8) CFG_AIRCRAFT_REG = CFG_AIRCRAFT_REG.substring(0, 8);
+          Serial.print("CFG:AIRCRAFT_REG="); Serial.println(CFG_AIRCRAFT_REG);
+        }
+        
+        pos = nextSep + 1;
+      }
     }
   }
 }
@@ -615,7 +768,18 @@ void runBootSequence() {
   else if (elapsed < 1650) displayText("--08--", "  init");
   else if (elapsed < 1800) displayText("--09--", "  init");
   else if (elapsed < 1950) displayText("--10--", "  init");
-  // Stage 3: All off, sequence complete (1950ms+)
+  // Stage 3: Show aircraft registration (1950-2450ms)
+  else if (elapsed < 2450) {
+    // Split registration for two displays (up to 8 chars total)
+    String reg = CFG_AIRCRAFT_REG;
+    String leftReg = reg.substring(0, min(6, (int)reg.length()));
+    String rightReg = (reg.length() > 6) ? reg.substring(6) : "      ";
+    // Pad to 6 chars
+    while (leftReg.length() < 6) leftReg += " ";
+    while (rightReg.length() < 6) rightReg += " ";
+    displayText(leftReg, rightReg);
+  }
+  // Stage 4: All off, sequence complete (2450ms+)
   else {
     setLEDState(0x0000, false, false, 0);
     displayText("      ", "      ");
@@ -855,17 +1019,22 @@ void setup() {
   digitalWrite(ledMlsSel, LOW);
   setLEDState(0x0000, false, false, 0);
   
-  // Attach rotary encoder interrupts (both pins for better reliability)
-  attachInterrupt(digitalPinToInterrupt(rotary1PinA), updateRotary1, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(rotary1PinB), updateRotary1, CHANGE);
+  // Use polling for both rotary encoders (more consistent behavior)
+  // Hardware interrupts on RT1 can cause excessive triggering with bouncing
+  // Polling in main loop at 10ms intervals provides stable, debounced reads
   
-  // Pro Micro: pins 9 and 10 do NOT support hardware interrupts!
-  // Only pins 0,1,2,3,7 support interrupts on ATmega32U4
-  // We need to poll rotary 2 in the main loop instead
-  // attachInterrupt(digitalPinToInterrupt(rotary2PinA), updateRotary2, CHANGE);
-  // attachInterrupt(digitalPinToInterrupt(rotary2PinB), updateRotary2, CHANGE);
-  
-  Serial.println("SETUP:Pin 9/10 no interrupts, using polling for RT2;");
+  // Print configuration
+  Serial.print("SETUP:Rotary polling mode, Config=0b");
+  Serial.print(ROTARY_CONFIG, BIN);
+  Serial.print(" (RT1=");
+  Serial.print(RT1_SENSITIVITY, BIN);
+  Serial.print(", RT2=");
+  Serial.print(RT2_SENSITIVITY, BIN);
+  Serial.println(");");
+  Serial.print("SETUP:Debounce="); Serial.print(CFG_BUTTON_DEBOUNCE);
+  Serial.print("ms, LED="); Serial.print(CFG_LED_REFRESH);
+  Serial.print("ms, DSP="); Serial.print(CFG_DISPLAY_REFRESH);
+  Serial.print("ms, REG="); Serial.println(CFG_AIRCRAFT_REG);
   
   // Start boot sequence
   bootState = BOOT_INIT;
@@ -903,7 +1072,7 @@ void loop() {
   // Detect button changes (debounced)
   bool inputChanged = false;
   if (inputState1 != lastInputState1 || inputState2 != lastInputState2) {
-    if (now - lastDebounceTs >= DEBOUNCE_MS) {
+    if (now - lastDebounceTs >= CFG_BUTTON_DEBOUNCE) {
       lastDebounceTs = now;
       lastInputState1 = inputState1;
       lastInputState2 = inputState2;
@@ -923,13 +1092,15 @@ void loop() {
   // Check for DIAG combo (after debounce)
   checkDiagCombo();
   
-  // Poll rotary 2 manually (pins 9/10 don't support interrupts on Pro Micro)
+  // Poll both rotary encoders (consistent polling instead of interrupts)
+  updateRotary1();
   updateRotary2();
   
-  // Send status periodically or if rotary changed
+  // Only send status if there's actual activity (rotary or buttons changed)
   if (rotary1Counter != lastRotary1Counter || rotary2Counter != lastRotary2Counter) {
-    sendStatus();
+    sendStatusImmediate();
   }
+  // No periodic sending - only send on actual changes
   
   // Update offline display if needed (non-blocking)
   updateOfflineDisplay();
