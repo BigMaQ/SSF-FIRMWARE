@@ -112,6 +112,9 @@ volatile uint8_t rotary2LastEncoded = 0;
 volatile unsigned long rotary1LastChangeTime = 0;
 volatile unsigned long rotary2LastChangeTime = 0;
 const unsigned long ROTARY_FAST_THRESHOLD_MS = 50;  // < 50ms between steps = fast turn
+// Menu-specific guard to avoid double-counting when navigating menus
+volatile unsigned long rotary1LastMenuEventTs = 0;
+const unsigned long ROTARY_MENU_MIN_MS = 180; // minimum ms between accepted rotary increments while in menu (increased to reduce double-count)
 
 // MobiFlight-style rotary encoder configuration
 // Format: 0b<RT2_config><RT1_config> where each is 2 bits:
@@ -126,17 +129,27 @@ uint8_t RT2_SENSITIVITY = (ROTARY_CONFIG >> 2) & 0b11;  // Bits 2-3
 uint8_t CFG_BUTTON_DEBOUNCE = 12;     // Button debounce time in ms (00-99), default 12ms
 uint16_t CFG_LED_REFRESH = 1200;      // LED refresh interval in ms, default 1200ms
 uint16_t CFG_DISPLAY_REFRESH = 1200;  // Display refresh interval in ms, default 1200ms
-String CFG_AIRCRAFT_REG = "SSFA320";  // Aircraft registration, default SSFA320, max 8 chars
+String CFG_AIRCRAFT_REG = "D-A320";   // Aircraft registration, default D-A320, max 8 chars
+String CFG_PCB_VERSION = "PCB 1.0";   // PCB version, default PCB 1.0, max 8 chars
 
 // EEPROM storage layout for configuration
 const int EEPROM_BASE_ADDR = 0; // start address
 const uint16_t EEPROM_MAGIC = 0xA55A;
-const uint8_t EEPROM_FORMAT_VERSION = 1;
-// Layout (offsets): 0-1 magic (uint16), 2 version (uint8), 3-10 reg[8], 11 checksum (uint8)
+const uint8_t EEPROM_FORMAT_VERSION = 2;  // Incremented for new layout
+// Layout (offsets): 
+// 0-1: magic (uint16)
+// 2: version (uint8)
+// 3-10: aircraft_reg[8]
+// 11-18: pcb_version[8]
+// 19: checksum (uint8)
 
 // Editing buffer for Settings->HW ID
 char editReg[9] = {0}; // 8 chars + null
 int editPos = 0;
+
+// PIN & Settings state (Serial-based, not menu-based)
+bool settingsEnabled = false;
+const String SETTINGS_PIN = "0815";
 
 // ============================================================================
 // TIMING / THROTTLES / DEBOUNCE
@@ -149,6 +162,143 @@ const unsigned long SEND_MIN_INTERVAL_MS = 10;
 
 unsigned long lastDebounceTs = 0;
 // DEBOUNCE_MS now uses CFG_BUTTON_DEBOUNCE (set above in config section)
+
+// ============================================================================
+// BUTTON & LED DEFINITIONS FOR BUTTON TEST
+// ============================================================================
+
+// Button names and their LED bit positions
+// IN1 bits: 0=XFER, 1=VHF1, 2=VHF2, 3=VHF3, 4=HF1, 5=MODE1/SEL, 6=AM, 7=HF2
+// IN2 bits: 0=NAV, 1=VOR, 2=ILS, 3=MLS, 4=ADF, 5=UNUSED, 6=UNUSED, 7=UNUSED
+
+struct ButtonDef {
+  const char* name;     // Display name (max 6 chars)
+  uint8_t ledRegister;  // 1 or 2 (which 8-bit register)
+  uint8_t ledBit;       // 0-7 (which bit in that register)
+};
+
+// Button definitions for IN1 (register/chip 1 = high byte)
+// IN1 bits: 0=XFER, 1=VHF1, 2=VHF2, 3=VHF3, 4=HF1, 5=SEL, 6=AM, 7=HF2
+const ButtonDef buttons_IN1[8] = {
+  {"XFEr  ", 0, 0},  // Bit 0: XFER - no LED
+  {"uhf1  ", 2, 0},  // Bit 1: VHF1 - LED on register 2 bit 0
+  {"uhf2  ", 2, 1},  // Bit 2: VHF2 - LED on register 2 bit 1
+  {"uhf3  ", 2, 2},  // Bit 3: VHF3 - LED on register 2 bit 2
+  {"hf1   ", 2, 3},  // Bit 4: HF1 - LED on register 2 bit 3
+  {"SEL   ", 0, 0},  // Bit 5: MODE1/SEL - no LED
+  {"an$    ", 2, 4},  // Bit 6: AM - LED on register 2 bit 4
+  {"hf2   ", 2, 5},  // Bit 7: HF2 - LED on register 2 bit 5
+};
+
+// Button definitions for IN2 (register/chip 2 = low byte)
+// IN2 bits: 0=NAV, 1=VOR, 2=ILS, 3=MLS, 4=ADF, 5=ONOFF, 6=UNUSED, 7=UNUSED
+const ButtonDef buttons_IN2[8] = {
+  {"nAU   ", 2, 6},  // Bit 0: NAV - LED on register 2 bit 6
+  {"uor   ", 2, 7},  // Bit 1: VOR - LED on register 2 bit 7
+  {"ils   ", 0, 2},  // Bit 2: ILS - Special: direct LED pin (ledIlsSel)
+  {"n$ls   ", 0, 3},  // Bit 3: MLS - Special: direct LED pin (ledMlsSel)
+  {"adf   ", 1, 6},  // Bit 4: ADF - LED on register 1 bit 6
+  {"on-off", 0, 0},  // Bit 5: ON/OFF - no LED
+  {"UnUSEd", 0, 0},  // Bit 6: Unused
+  {"UnUSEd", 0, 0},  // Bit 7: Unused
+};
+
+// Button LED state tracking for fade effects
+struct ButtonLEDState {
+  uint8_t targetBrightness;  // 0 = off, 255 = full
+  uint8_t currentBrightness; // For fade animations
+  unsigned long fadeStartTs;
+  bool isFading;
+};
+
+// Track LED fade state for each button (8 on IN1 + 8 on IN2)
+ButtonLEDState buttonLEDStates[16];
+
+void displayButtonPressed(uint8_t bitIndex, uint8_t registerNum) {
+  const ButtonDef *btn = (registerNum == 1) ? &buttons_IN1[bitIndex] : &buttons_IN2[bitIndex];
+  displayText(btn->name, "PrESEd");
+}
+
+void displayButtonReleased(uint8_t bitIndex, uint8_t registerNum) {
+  const ButtonDef *btn = (registerNum == 1) ? &buttons_IN1[bitIndex] : &buttons_IN2[bitIndex];
+  displayText(btn->name, "rELSEd");
+}
+
+void controlButtonLED(uint8_t bitIndex, uint8_t registerNum, bool pressed) {
+  const ButtonDef *btn = (registerNum == 1) ? &buttons_IN1[bitIndex] : &buttons_IN2[bitIndex];
+  
+  // Check for direct LED pins (ILS/MLS) - ledRegister == 0 and ledBit identifies which
+  if (btn->ledRegister == 0) {
+    if (btn->ledBit == 2) {  // ILS (IN2 bit 2)
+      desiredIlsLed = pressed;
+      applyLEDOutputs();
+    } else if (btn->ledBit == 3) {  // MLS (IN2 bit 3)
+      desiredMlsLed = pressed;
+      applyLEDOutputs();
+    }
+    // Otherwise no LED (XFER, SEL, ON/OFF, UNUSED buttons)
+    return;
+  }
+  
+  // Shift register LEDs: control via 16-bit desiredLedState
+  uint16_t ledMask = (btn->ledRegister == 1) 
+    ? (1 << (8 + btn->ledBit))  // High byte (register 1)
+    : (1 << btn->ledBit);        // Low byte (register 2)
+  
+  if (pressed) {
+    desiredLedState |= ledMask;   // Set bit ON
+  } else {
+    desiredLedState &= ~ledMask;  // Clear bit OFF
+  }
+  applyLEDOutputs();
+}
+
+void updateButtonLEDFades() {
+  // Update fade animations for button LEDs (called from main loop in menu)
+  unsigned long now = millis();
+  const unsigned long FADE_DURATION_MS = 300;
+  
+  for (int i = 0; i < 16; i++) {
+    if (!buttonLEDStates[i].isFading) continue;
+    
+    unsigned long elapsed = now - buttonLEDStates[i].fadeStartTs;
+    if (elapsed >= FADE_DURATION_MS) {
+      buttonLEDStates[i].currentBrightness = buttonLEDStates[i].targetBrightness;
+      buttonLEDStates[i].isFading = (buttonLEDStates[i].targetBrightness > 0);
+      if (buttonLEDStates[i].targetBrightness == 0) {
+        // Final fade-out: clear the LED bit
+        uint8_t registerNum = (i < 8) ? 1 : 2;
+        uint8_t bitIndex = i % 8;
+        const ButtonDef *btn = (registerNum == 1) ? &buttons_IN1[bitIndex] : &buttons_IN2[bitIndex];
+        
+        if (btn->ledRegister > 0) {
+          uint16_t ledMask = (btn->ledRegister == 1)
+            ? (1 << (8 + btn->ledBit))
+            : (1 << btn->ledBit);
+          desiredLedState &= ~ledMask;
+          applyLEDOutputs();
+        } else if (registerNum == 2 && bitIndex == 2) {
+          desiredIlsLed = false;
+          applyLEDOutputs();
+        } else if (registerNum == 2 && bitIndex == 3) {
+          desiredMlsLed = false;
+          applyLEDOutputs();
+        }
+      }
+      continue;
+    }
+    
+    // Interpolate brightness fade
+    float progress = (float)elapsed / FADE_DURATION_MS;
+    if (buttonLEDStates[i].targetBrightness == 0) {
+      // Fade out (255 -> 0)
+      buttonLEDStates[i].currentBrightness = (uint8_t)(255 * (1.0 - progress));
+    } else {
+      // Fade in (0 -> 255)
+      buttonLEDStates[i].currentBrightness = (uint8_t)(255 * progress);
+    }
+  }
+}
 
 // ============================================================================
 // BOOT / CONNECTION STATE
@@ -176,10 +326,11 @@ int menuIndex = 0;        // 0..3 main menu
 int menuSubIndex = 0;     // submenu selection
 int menuMode = 0;         // 0 = main menu, 1 = submenu for option1, 2 = button test, 3 = show info, 4 = settings
 int lastMenuRotary1 = 0;
+int lastMenuRotary2 = 0;
 bool lastXferPressed = false;
 unsigned long lastXferPressTime = 0;
-const uint8_t BUTTON_XFER_MASK1 = 0x01; // default bit mask for XFER (can be adjusted)
-const uint8_t BUTTON_XFER_MASK2 = 0x00; // alternative mask in inputState2 if needed
+const uint8_t BUTTON_XFER_MASK1 = 0x01; // XFER on inputState1 bit 0 (IN1:00000001)
+const uint8_t BUTTON_XFER_MASK2 = 0x00; // ignore inputState2 for XFER
 
 // XFER handling guard to avoid double registration
 unsigned long lastXferHandledTs = 0;
@@ -248,11 +399,24 @@ void setDisplayBrightness(uint8_t brightness) {
 }
 
 // Map characters to 7-segment patterns (simple A-Z, 0-9, space, dash)
+// 7-segment layout:
+//     a
+//    ---
+//  f| g |b
+//    ---
+//  e|   |c
+//    ---
+//     d   (dp)
+// Bit pattern: 0bDPgfedcba
 byte charTo7Seg(char c) {
+  // Special characters for better display
+  if (c == '$') return 0b00000100;  // Custom "m": segments c,e (right and bottom-left vertical)
+  
   // Check for lowercase characters before converting to uppercase
   if (c == 'o') return 0b00011101;  // Lowercase o (bottom segments only)
   if (c == 'i') return 0b00010000;  // Lowercase i (just vertical segments)
-  if (c == 'm') return 0b00010101;  // Lowercase m (simplified)
+  if (c == 'm') return 0b00010101;  // Lowercase m: segments c, e (looks like "ni" when paired)
+  if (c == 'y') return 0b00111011;  // Lowercase y: like "4" with bottom segment (b,c,d,f,g)
   
   c = toupper(c);
   switch (c) {
@@ -277,6 +441,7 @@ byte charTo7Seg(char c) {
     case 'I': return 0b00110000;
     case 'J': return 0b00111100;
     case 'L': return 0b00001110;
+    case 'M': return 0b00010101;  // Same as lowercase m
     case 'N': return 0b00010101;
     case 'O': return 0b01111110;
     case 'P': return 0b01100111;
@@ -284,6 +449,8 @@ byte charTo7Seg(char c) {
     case 'S': return 0b01011011;
     case 'T': return 0b00001111;
     case 'U': return 0b00111110;
+    case 'X': return 0b00110111;  // H with middle segment (looks like +/×)
+    case 'Y': return 0b00111011;  // Same as lowercase y
     case '-': return 0b00000001;
     case ' ': return 0b00000000;
     default:  return 0b00000000;
@@ -340,50 +507,22 @@ void displayText(const String &left, const String &right) {
   scrollOffsetRight = 0;
   lastScrollTs = millis();
 
-  // Compute initial window and update displays immediately using display-character-aware windowing
-  auto buildWindow = [](const String &full, int offsetChars) {
-    String out = "      ";
+  // Windowing that preserves '.' so DP can be shown. We place up to 6 digits/letters,
+  // but we keep any '.' that belong to those digits in the output string.
+  auto buildWindow = [](const String &full) {
+    String out = "";
     int placed = 0;
-    bool lastHadChar = false;
     for (int i = 0; i < full.length() && placed < 6; i++) {
       char c = full.charAt(i);
-      if (c == '.') {
-        // decimal point applies to previous digit if any
-        if (placed > 0) {
-          // set DP on previous character (store as '.' after it, updateDisplay handles DP)
-          // we append '.' as marker to output by replacing next position if available
-          // we instead set the DP by inserting '.' into the stream right after previous char
-          // Find position in out to append '.' after last placed
-          int posToSet = placed - 1;
-          // if there's still room to represent the '.' as separate char, insert it after previous
-          // but to keep format simple, we won't shift characters; updateDisplay understands '.' as modifier
-          // so we will append '.' to the output by shifting remaining chars right if room
-          // This simplified implementation will ignore isolated leading DPs.
-        }
-        continue;
-      }
-      // skip until offsetChars characters passed
-      if (offsetChars > 0) {
-        offsetChars -= 1;
-        continue;
-      }
-      out.setCharAt(placed, c);
-      placed++;
-      // if next char is dot, include it as dot after the char in the output string if space permits
-      int nextIdx = i + 1;
-      if (nextIdx < full.length() && full.charAt(nextIdx) == '.' && placed < 6) {
-        // append dot as separate char after current placed char
-        out.setCharAt(placed, '.');
-        placed++;
-        i++; // consume dot
-      }
+      out += c;              // keep char (including '.')
+      if (c != '.') placed++; // count only real digits/letters
     }
-    // fill rest with spaces
-    for (int j = placed; j < 6; j++) out.setCharAt(j, ' ');
+    // Pad with spaces if fewer than 6 chars were placed
+    while (placed < 6) { out += ' '; placed++; }
     return out;
   };
-  String leftWindow = buildWindow(currentLeftFull, scrollOffsetLeft);
-  String rightWindow = buildWindow(currentRightFull, scrollOffsetRight);
+  String leftWindow = buildWindow(currentLeftFull);
+  String rightWindow = buildWindow(currentRightFull);
   updateDisplay(DISP_LEFT, leftWindow);
   updateDisplay(DISP_RIGHT, rightWindow);
   displayLeft = leftWindow;
@@ -394,37 +533,25 @@ void displayText(const String &left, const String &right) {
 void scrollTick(unsigned long now) {
   if ((now - lastScrollTs) < SCROLL_INTERVAL_MS) return;
   lastScrollTs = now;
-  bool updated = false;
   auto effectiveLength = [](const String &s) {
     int cnt = 0;
     for (int i = 0; i < s.length(); i++) if (s.charAt(i) != '.') cnt++;
     return cnt;
   };
-  // Build window similar to displayText builder
+  // Windowing for scrolling that preserves '.' so DP renders
   auto buildWindow = [](const String &full, int offsetChars) {
-    String out = "      ";
+    String out = "";
     int placed = 0;
+    int skipped = 0;
     for (int i = 0; i < full.length() && placed < 6; i++) {
       char c = full.charAt(i);
-      if (c == '.') {
-        // DP attaches to previous if possible (we keep DP as separate char)
-        if (placed > 0 && placed < 6) {
-          out.setCharAt(placed, '.');
-          placed++;
-        }
-        continue;
-      }
-      if (offsetChars > 0) { offsetChars -= 1; continue; }
-      out.setCharAt(placed, c);
-      placed++;
-      int nextIdx = i + 1;
-      if (nextIdx < full.length() && full.charAt(nextIdx) == '.' && placed < 6) {
-        out.setCharAt(placed, '.');
+      if (c != '.') {
+        if (skipped < offsetChars) { skipped++; continue; }
         placed++;
-        i++;
       }
+      out += c; // keep character, including '.'
     }
-    for (int j = placed; j < 6; j++) out.setCharAt(j, ' ');
+    while (placed < 6) { out += ' '; placed++; }
     return out;
   };
 
@@ -436,7 +563,6 @@ void scrollTick(unsigned long now) {
     String leftWindow = buildWindow(currentLeftFull, scrollOffsetLeft);
     updateDisplay(DISP_LEFT, leftWindow);
     displayLeft = leftWindow;
-    updated = true;
   }
   if (scrollRightEnabled) {
     int elen = effectiveLength(currentRightFull);
@@ -446,9 +572,7 @@ void scrollTick(unsigned long now) {
     String rightWindow = buildWindow(currentRightFull, scrollOffsetRight);
     updateDisplay(DISP_RIGHT, rightWindow);
     displayRight = rightWindow;
-    updated = true;
   }
-  // if updated, nothing else to do (displays refreshed)
 }
 
 // ============================================================================
@@ -575,8 +699,17 @@ void updateRotary1() {
   if (validTransition) {
     // Debounce: only count if enough time passed since last change (2ms minimum)
     if ((now - rotary1LastChangeTime) >= 2 || rotary1LastChangeTime == 0) {
-      rotary1Counter += (direction * step);
-      rotary1LastChangeTime = now;
+      // If we're in DIAG menu, enforce a slightly longer minimum interval to avoid double-counts
+      if (bootState == BOOT_DIAG_MENU) {
+        if ((now - rotary1LastMenuEventTs) >= ROTARY_MENU_MIN_MS) {
+          rotary1Counter += (direction * step);
+          rotary1LastChangeTime = now;
+          rotary1LastMenuEventTs = now;
+        }
+      } else {
+        rotary1Counter += (direction * step);
+        rotary1LastChangeTime = now;
+      }
     }
   }
   
@@ -775,32 +908,138 @@ void processIncomingLine(const String &line) {
             ROTARY_CONFIG = (rt2 << 2) | rt1;
             RT1_SENSITIVITY = rt1;
             RT2_SENSITIVITY = rt2;
-            Serial.print("CFG:ROTARY=0b"); Serial.println(ROTARY_CONFIG, BIN);
           }
         }
         else if (param.startsWith("DEB")) {
-          // DEB followed by 2 digits (00-99 ms)
           CFG_BUTTON_DEBOUNCE = constrain(param.substring(3).toInt(), 0, 99);
-          Serial.print("CFG:DEBOUNCE="); Serial.println(CFG_BUTTON_DEBOUNCE);
         }
         else if (param.startsWith("LED")) {
-          // LED followed by refresh time in ms
           CFG_LED_REFRESH = constrain(param.substring(3).toInt(), 100, 10000);
-          Serial.print("CFG:LED_REFRESH="); Serial.println(CFG_LED_REFRESH);
         }
         else if (param.startsWith("DSP")) {
-          // DSP followed by refresh time in ms
           CFG_DISPLAY_REFRESH = constrain(param.substring(3).toInt(), 100, 10000);
-          Serial.print("CFG:DISPLAY_REFRESH="); Serial.println(CFG_DISPLAY_REFRESH);
         }
         else if (param.startsWith("REG:")) {
-          // REG: followed by aircraft registration (max 8 chars)
           CFG_AIRCRAFT_REG = param.substring(4);
           if (CFG_AIRCRAFT_REG.length() > 8) CFG_AIRCRAFT_REG = CFG_AIRCRAFT_REG.substring(0, 8);
-          Serial.print("CFG:AIRCRAFT_REG="); Serial.println(CFG_AIRCRAFT_REG);
         }
         
         pos = nextSep + 1;
+      }
+    }
+    else if (token.startsWith("SET ")) {
+      // Serial-based settings: SET ENA, SET FW, SET ACID, WRITE
+      String setCmd = token.substring(4);  // Remove "SET "
+      setCmd.trim();
+      
+      if (setCmd.startsWith("ENA:")) {
+        // PIN authentication: SET ENA:0815
+        String pin = setCmd.substring(4);
+        pin.trim();
+        if (pin == SETTINGS_PIN) {
+          settingsEnabled = true;
+          Serial.println("SET ENA> ;");
+        } else {
+          Serial.println("SET ENA:FAIL ;");
+        }
+      }
+      else if (setCmd.startsWith("FW:") && settingsEnabled) {
+        // Firmware version: SET FW:1.5
+        String version = setCmd.substring(3);
+        version.trim();
+        
+        int dotPos = version.indexOf('.');
+        if (dotPos > 0 && dotPos < version.length() - 1) {
+          String majorStr = version.substring(0, dotPos);
+          String minorStr = version.substring(dotPos + 1);
+          int major = majorStr.toInt();
+          int minor = minorStr.toInt();
+          
+          if (major >= 1 && major <= 9 && minor >= 0 && minor <= 9) {
+            CFG_PCB_VERSION = String("PCb ") + major + "." + minor;
+            Serial.println("SET FW:OK ;");
+          } else {
+            Serial.println("SET FW:RANGE ;");
+          }
+        } else {
+          Serial.println("SET FW:FORMAT ;");
+        }
+      }
+      else if (setCmd.startsWith("ACID:") && settingsEnabled) {
+        // Aircraft ident: SET ACID:D-AIDA (format: letter-letters, max 8 chars total)
+        String ident = setCmd.substring(5);
+        ident.trim();
+        
+        if (ident.length() >= 3 && ident.length() <= 8) {
+          // Find dash position
+          int dashPos = ident.indexOf('-');
+          if (dashPos > 0 && dashPos < ident.length() - 1) {
+            // Validate: before dash must be 1 letter, after dash all letters
+            bool valid = true;
+            if (dashPos != 1) {
+              valid = false;  // Dash must be at position 1 (after first letter)
+            } else {
+              // Check first char is alpha
+              if (!isAlpha(ident.charAt(0))) valid = false;
+              // Check rest after dash are alpha
+              for (int i = dashPos + 1; i < ident.length(); i++) {
+                if (!isAlpha(ident.charAt(i))) {
+                  valid = false;
+                  break;
+                }
+              }
+            }
+            if (valid) {
+              CFG_AIRCRAFT_REG = ident;
+              Serial.println("SET ACID:OK ;");
+            } else {
+              Serial.println("SET ACID:FORMAT ;");
+            }
+          } else {
+            Serial.println("SET ACID:FORMAT ;");
+          }
+        } else {
+          Serial.println("SET ACID:FORMAT ;");
+        }
+      }
+      else if (setCmd.startsWith("WRI:") && settingsEnabled) {
+        // Write to EEPROM: SET WRI:YES
+        String cmd = setCmd.substring(4);
+        cmd.trim();
+        
+        if (cmd.equalsIgnoreCase("YES")) {
+          // Use the standard saveHWInfo function
+          saveHWInfo();
+          settingsEnabled = false;
+          Serial.println("SET WRI:OK ;");
+        } else {
+          Serial.println("SET WRI:FORMAT ;");
+        }
+      }
+      else if (setCmd.startsWith("WRITE")) {
+        // Handle both "SET WRITE" and "SET WRITE:"
+        if (settingsEnabled) {
+          uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, 
+                                             CFG_AIRCRAFT_REG.c_str(), 
+                                             CFG_PCB_VERSION.c_str());
+          
+          for (int i = 0; i < 8; i++) {
+            char c = (i < CFG_AIRCRAFT_REG.length()) ? CFG_AIRCRAFT_REG.charAt(i) : 0;
+            EEPROM.write(EEPROM_BASE_ADDR + 3 + i, c);
+          }
+          
+          for (int i = 0; i < 8; i++) {
+            char c = (i < CFG_PCB_VERSION.length()) ? CFG_PCB_VERSION.charAt(i) : 0;
+            EEPROM.write(EEPROM_BASE_ADDR + 11 + i, c);
+          }
+          
+          EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
+          
+          settingsEnabled = false;
+          Serial.println("WRITE:OK ;");
+        } else {
+          Serial.println("WRITE:LOCKED ;");
+        }
       }
     }
   }
@@ -930,16 +1169,24 @@ void runBootSequence() {
   else if (elapsed < 1650) displayText("--08--", "  init");
   else if (elapsed < 1800) displayText("--09--", "  init");
   else if (elapsed < 1950) displayText("--10--", "  init");
-  // Stage 3: Show aircraft registration (1950-2450ms)
+  // Stage 3: Show PCB version (left) and A/C ident (right) (1950-2450ms)
   else if (elapsed < 2450) {
-    // Split registration for two displays (up to 8 chars total)
-    String reg = CFG_AIRCRAFT_REG;
-    String leftReg = reg.substring(0, min(6, (int)reg.length()));
-    String rightReg = (reg.length() > 6) ? reg.substring(6) : "      ";
-    // Pad to 6 chars
-    while (leftReg.length() < 6) leftReg += " ";
-    while (rightReg.length() < 6) rightReg += " ";
-    displayText(leftReg, rightReg);
+    // Left: full PCB version (trim/pad to 6 chars)
+    String leftDisplay = CFG_PCB_VERSION;
+    // If too long, try to remove a space to keep the numeric part
+    if (leftDisplay.length() > 6) {
+      int sp = leftDisplay.indexOf(' ');
+      if (sp >= 0) leftDisplay.remove(sp, 1);
+    }
+    if (leftDisplay.length() > 6) leftDisplay = leftDisplay.substring(0, 6);
+    while (leftDisplay.length() < 6) leftDisplay += " ";
+
+    // Right: aircraft ident (trim/pad to 6 chars)
+    String rightDisplay = CFG_AIRCRAFT_REG;
+    if (rightDisplay.length() > 6) rightDisplay = rightDisplay.substring(0, 6);
+    while (rightDisplay.length() < 6) rightDisplay += " ";
+
+    displayText(leftDisplay, rightDisplay);
   }
   // Stage 4: All off, sequence complete (2450ms+)
   else {
@@ -967,7 +1214,6 @@ void updateOfflineDisplay() {
       updateDisplay(DISP_RIGHT, displayRight);
       offlineDisplayStart = now;
       offlineMessageShown = true;
-      Serial.println("OFFLINE:MESSAGE_SHOWN;");
     }
     // If message is shown and timeout expired, clear it and STAY cleared
     else if (offlineMessageShown && (now - offlineDisplayStart) >= OFFLINE_DISPLAY_DURATION_MS) {
@@ -978,15 +1224,11 @@ void updateOfflineDisplay() {
         displayRight = "      ";
         updateDisplay(DISP_LEFT, displayLeft);
         updateDisplay(DISP_RIGHT, displayRight);
-        Serial.println("OFFLINE:MESSAGE_TIMEOUT;");
         // NOTE: offlineMessageShown stays TRUE to prevent automatic re-show
       }
     }
   } else {
     // Online - reset flags
-    if (offlineMessageShown) {
-      Serial.println("OFFLINE:MESSAGE_CLEARED_ONLINE;");
-    }
     offlineMessageShown = false;
   }
 }
@@ -1007,45 +1249,245 @@ void reactivateOfflineMessage() {
 }
 
 // ============================================================================
-// DIAG MODE
+// BUTTON TEST - Tight loop for instant response
+// ============================================================================
+void runButtonTest() {
+  // Display "PRESS BUTTON" message initially
+  static bool headerShown = false;
+  static unsigned long testStartTime = 0;
+  
+  if (!headerShown) {
+    displayText("PrESS ", "bUtton");
+    testStartTime = millis();
+    headerShown = true;
+    // Initialize input state baseline
+    readShiftRegisters(lastInputState1, lastInputState2);
+  }
+  
+  unsigned long now = millis();
+  unsigned long lastButtonActivityTs = now;  // Track last button activity for timeout
+  
+  // Tight loop - NO throttle, runs as fast as possible
+  while (true) {
+    now = millis();
+    
+    // Read inputs directly - NO debounce
+    uint8_t currentIn1, currentIn2;
+    readShiftRegisters(currentIn1, currentIn2);
+    
+    // Check for button state changes in IN1
+    if (currentIn1 != lastInputState1) {
+      uint8_t changed = currentIn1 ^ lastInputState1;
+      
+      // Find and display the changed button
+      for (int i = 0; i < 8; i++) {
+        if (changed & (1 << i)) {
+          bool isPressed = (currentIn1 >> i) & 1;
+          
+          if (isPressed) {
+            displayButtonPressed(i, 1);
+            controlButtonLED(i, 1, true);
+          } else {
+            displayButtonReleased(i, 1);
+            controlButtonLED(i, 1, false);
+          }
+          lastButtonActivityTs = now;  // Update activity timestamp
+        }
+      }
+      
+      lastInputState1 = currentIn1;
+    }
+    
+    // Check for button state changes in IN2
+    if (currentIn2 != lastInputState2) {
+      uint8_t changed = currentIn2 ^ lastInputState2;
+      
+      // Find and display the changed button
+      for (int i = 0; i < 8; i++) {
+        if (changed & (1 << i)) {
+          bool isPressed = (currentIn2 >> i) & 1;
+          
+          if (isPressed) {
+            displayButtonPressed(i, 2);
+            controlButtonLED(i, 2, true);
+          } else {
+            displayButtonReleased(i, 2);
+            controlButtonLED(i, 2, false);
+          }
+          lastButtonActivityTs = now;  // Update activity timestamp
+        }
+      }
+      
+      lastInputState2 = currentIn2;
+    }
+    
+    // If all buttons released and 1 second passed, show "PRESS BUTTON"
+    if ((currentIn1 == 0) && (currentIn2 == 0) && (now - lastButtonActivityTs >= 1000)) {
+      displayText("PrESS ", "bUtton");
+      lastButtonActivityTs = now + 10000;  // Prevent repeated updates
+    }
+    
+    // Poll rotary encoders
+    updateRotary1();
+    updateRotary2();
+    
+    int rt1Delta = rotary1Counter - lastMenuRotary1;
+    int rt2Delta = rotary2Counter - lastMenuRotary2;
+    
+    if (rt1Delta != 0 && (now - rotary1LastMenuEventTs) >= ROTARY_MENU_MIN_MS) {
+      String direction = (rt1Delta > 0) ? "INC   " : "dEC   ";
+      displayText("rot1  ", direction);
+      delay(1000);  // Show for 1 second
+      displayText("PrESS ", "bUtton");
+      lastMenuRotary1 = rotary1Counter;
+      rotary1LastMenuEventTs = now;
+      lastButtonActivityTs = now + 10000;  // Prevent button timeout trigger
+    }
+    
+    if (rt2Delta != 0) {
+      String direction = (rt2Delta > 0) ? "INC   " : "dEC   ";
+      displayText("rot2  ", direction);
+      delay(1000);  // Show for 1 second
+      displayText("PrESS ", "bUtton");
+      lastMenuRotary2 = rotary2Counter;
+      lastButtonActivityTs = now + 10000;  // Prevent button timeout trigger
+    }
+    
+    // Check for XFER double-click to exit
+    static unsigned long lastXferPressTs = 0;
+    static bool xferWasPressed = false;
+    bool xferPressed = (currentIn1 & BUTTON_XFER_MASK1);
+    
+    if (xferPressed && !xferWasPressed) {
+      // XFER pressed
+      if (now - lastXferPressTs < 500) {
+        // Double-click detected (within 500ms)
+        delay(200);  // Debounce
+        setLEDState(0x0000, false, false, 0);
+        displayText("      ", "      ");
+        menuMode = 0;
+        menuInitialized = false;
+        headerShown = false;
+        return;
+      }
+      lastXferPressTs = now;
+    }
+    xferWasPressed = xferPressed;
+    
+    // Small delay to prevent Arduino lock-up (1ms = 1000 loops/sec)
+    delayMicroseconds(500);
+  }
+}
+
+// ============================================================================
+// SHIFT REGISTER TEST - Live display of IN1/IN2 states
+// ============================================================================
+void runShiftRegTest() {
+  static bool headerShown = false;
+  static unsigned long lastToggleTs = 0;
+  static bool showIN1 = true;
+  
+  if (!headerShown) {
+    displayText("ShIFt ", "rEG   ");
+    delay(1000);
+    headerShown = true;
+    lastToggleTs = millis();
+  }
+  
+  unsigned long now = millis();
+  
+  // Tight loop - NO throttle
+  while (true) {
+    now = millis();
+    
+    // Read inputs directly
+    uint8_t currentIn1, currentIn2;
+    readShiftRegisters(currentIn1, currentIn2);
+    
+    // Toggle between IN1 and IN2 display every 1 second
+    if (now - lastToggleTs >= 1000) {
+      showIN1 = !showIN1;
+      lastToggleTs = now;
+    }
+    
+    // Format display: "IN1:00" "000000" or "IN2:00" "000000"
+    String leftDisplay, rightDisplay;
+    
+    if (showIN1) {
+      leftDisplay = "In1 ";
+      leftDisplay += ((currentIn1 >> 6) & 1) ? "1" : "0";
+      leftDisplay += ((currentIn1 >> 7) & 1) ? "1" : "0";
+      
+      rightDisplay = "";
+      for (int i = 5; i >= 0; i--) {
+        rightDisplay += ((currentIn1 >> i) & 1) ? "1" : "0";
+      }
+    } else {
+      leftDisplay = "In2 ";
+      leftDisplay += ((currentIn2 >> 6) & 1) ? "1" : "0";
+      leftDisplay += ((currentIn2 >> 7) & 1) ? "1" : "0";
+      
+      rightDisplay = "";
+      for (int i = 5; i >= 0; i--) {
+        rightDisplay += ((currentIn2 >> i) & 1) ? "1" : "0";
+      }
+    }
+    
+    displayText(leftDisplay, rightDisplay);
+    
+    // Check for XFER double-click to exit
+    static unsigned long lastXferPressTs = 0;
+    static bool xferWasPressed = false;
+    bool xferPressed = (currentIn1 & BUTTON_XFER_MASK1);
+    
+    if (xferPressed && !xferWasPressed) {
+      if (now - lastXferPressTs < 500) {
+        // Double-click detected
+        delay(200);
+        displayText("      ", "      ");
+        menuMode = 0;
+        menuInitialized = false;
+        headerShown = false;
+        return;
+      }
+      lastXferPressTs = now;
+    }
+    xferWasPressed = xferPressed;
+    
+    // Small delay
+    delayMicroseconds(500);
+  }
+}
+
+// ============================================================================
+// DIAG MODE - SIMPLIFIED MENU
 // ============================================================================
 void runDiagMenu() {
   unsigned long now = millis();
-  // While in DIAG menu we still need to poll inputs and encoders so the menu is responsive
+  
+  // Poll inputs & encoders every iteration (NO throttle in button test for instant response)
   readShiftRegisters(inputState1, inputState2);
   updateRotary1();
   updateRotary2();
 
-  // Simple debounce so menu reacts to stable button presses (reuse same debounce variables)
+  // Debounce inputs
   if (inputState1 != lastInputState1 || inputState2 != lastInputState2) {
     if (now - lastDebounceTs >= CFG_BUTTON_DEBOUNCE) {
       lastDebounceTs = now;
-      // record previous stable state, then update last stable state
-      prevInputState1 = lastInputState1;
-      prevInputState2 = lastInputState2;
       lastInputState1 = inputState1;
       lastInputState2 = inputState2;
-      // store pending changed masks for menu tests to consume
-      pendingChanged1 = lastInputState1 ^ prevInputState1;
-      pendingChanged2 = lastInputState2 ^ prevInputState2;
-      // notify offline message reactivation if anything actually changed
-      if (pendingChanged1 || pendingChanged2) {
-        reactivateOfflineMessage();
-      }
+      reactivateOfflineMessage();
     }
   }
+
   // Initialize menu on first entry
   if (!menuInitialized) {
     menuInitialized = true;
     menuIndex = 0;
-    menuSubIndex = 0;
     menuMode = 0;
     lastMenuRotary1 = rotary1Counter;
     lastXferPressed = false;
-    lastXferPressTime = 0;
-    // Show heading for 2 seconds
-    displayText("dIAG  ", "nnEnu ");
-    // initialize menu activity timers
+    displayText("dIAG  ", "n$Enu ");
     lastMenuActivityTs = now;
     lastMenuNavTs = now;
     return;
@@ -1054,93 +1496,81 @@ void runDiagMenu() {
   // Keep header visible for 2 seconds
   if ((now - diagStartTime) < 2000) return;
 
-  // Auto-exit menu after inactivity
+  // Auto-exit after inactivity
   if ((now - lastMenuActivityTs) >= MENU_INACTIVITY_TIMEOUT_MS) {
-    // exit to running state
+    // Clear display before exiting
+    setLEDState(0x0000, false, false, 0);
+    displayText("      ", "      ");
+    updateDisplay(DISP_LEFT, "      ");
+    updateDisplay(DISP_RIGHT, "      ");
     bootState = BOOT_RUNNING;
     menuInitialized = false;
     return;
   }
 
-  // Main menu navigation
+  // ===== MAIN MENU (menuMode == 0) =====
   if (menuMode == 0) {
     int delta = rotary1Counter - lastMenuRotary1;
     if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
-      // ignore rotary events immediately after entering submenu/menu to avoid accidental extra steps
+      // Skip if we're in ignore window
       if (now < menuNavIgnoreUntil) {
-        // consume and ignore deltas
         lastMenuRotary1 = rotary1Counter;
         lastMenuNavTs = now;
         return;
       }
-      // Move selection by delta sign (one step per nav debounce)
-      if (delta > 0) menuIndex += 1;
-      else menuIndex -= 1;
+      
+      // Navigate: 4 main items now
+      if (delta > 0) menuIndex++;
+      else menuIndex--;
       if (menuIndex < 0) menuIndex = 0;
-      if (menuIndex > 4) menuIndex = 4; // allow Exit as item 4
-      // consume all accumulated rotary delta (treat this as one nav step)
+      if (menuIndex > 3) menuIndex = 3;
+      
       lastMenuRotary1 = rotary1Counter;
       lastMenuNavTs = now;
+      menuNavIgnoreUntil = now + ROTARY_MENU_MIN_MS;
       lastMenuActivityTs = now;
     }
 
-    // Display menu entries (6-char per display)
+    // Display current menu item
     switch (menuIndex) {
-      case 0:
-        displayText("1. LED ", "tESt  ");
-        break;
-      case 1:
-        displayText("2.btn ", "tESt  ");
-        break;
-      case 2:
-        displayText("3.Shou", "Info  ");
-        break;
-      case 3:
-        displayText("4.Sett", "G nnEn");
-        break;
-      case 4:
-        displayText("5.Exit ", "toRUN ");
-        break;
+      case 0: displayText("1. LED ", "tESt  "); break;
+      case 1: displayText("2. butn", "tESt  "); break;
+      case 2: displayText("3. Info", "      "); break;
+      case 3: displayText("4. Exit", "to RUN "); break;
     }
 
-    // XFER (Enter) detection - rising edge (use debounced lastInputState)
+    // XFER (Enter) handling
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
-      // Handle enter
       lastXferPressed = true;
       lastXferPressTime = now;
-      lastMenuActivityTs = now;
       lastXferHandledTs = now;
+      lastMenuActivityTs = now;
+
       if (menuIndex == 0) {
-        menuMode = 1; menuSubIndex = 0; menuInitialized = true; // enter run submenu
-        // ignore rotary events briefly to avoid accidental extra nav
-        menuNavIgnoreUntil = now + 250;
+        // Enter LED Test submenu
+        menuMode = 1;
+        menuSubIndex = 0;
+        menuInitialized = true;
         lastMenuRotary1 = rotary1Counter;
+        menuNavIgnoreUntil = now + 250;
       } else if (menuIndex == 1) {
-        // enter button test
-        menuMode = 2; menuSubIndex = 0; menuInitialized = true;
-        // ensure button test starts with cleared states
-        lastRotary1Counter = rotary1Counter;
-        lastRotary2Counter = rotary2Counter;
-        prevInputState1 = lastInputState1;
-        prevInputState2 = lastInputState2;
-        menuNavIgnoreUntil = now + 250;
+        // Enter Button Test submenu (2 options)
+        menuMode = 4;  // Button submenu
+        menuSubIndex = 0;
+        menuInitialized = true;
         lastMenuRotary1 = rotary1Counter;
+        menuNavIgnoreUntil = now + 250;
       } else if (menuIndex == 2) {
-        menuMode = 3; menuSubIndex = 0; menuInitialized = true; // show info
-        menuNavIgnoreUntil = now + 250;
-        lastMenuRotary1 = rotary1Counter;
+        // Show Info (HW ID)
+        menuMode = 5;  // Info display
+        diagStartTime = now;
       } else if (menuIndex == 3) {
-        menuMode = 4; menuSubIndex = 0; menuInitialized = true; // settings
-        menuNavIgnoreUntil = now + 250;
-        lastMenuRotary1 = rotary1Counter;
-      } else if (menuIndex == 4) {
-        // Exit back to running - perform clean reset of display/LEDs
+        // Exit
         setLEDState(0x0000, false, false, 0);
         displayText("      ", "      ");
         updateDisplay(DISP_LEFT, "      ");
         updateDisplay(DISP_RIGHT, "      ");
-        forceSendNext = true;
         bootState = BOOT_RUNNING;
         menuInitialized = false;
         return;
@@ -1151,261 +1581,218 @@ void runDiagMenu() {
     return;
   }
 
-  // Submenus
-  if (menuMode == 1) {
-    // Run LED test submenu
+  // ===== BUTTON TEST (menuMode == 2) =====
+  if (menuMode == 2) {
+    // Run button test in tight loop for instant response (bypasses main loop throttle)
+    runButtonTest();
+    return;
+  }
+
+  // ===== SHIFT REG TEST (menuMode == 3) =====
+  if (menuMode == 3) {
+    // Run shift register test in tight loop
+    runShiftRegTest();
+    return;
+  }
+
+  // ===== BUTTON SUBMENU (menuMode == 4) =====
+  if (menuMode == 4) {
     int delta = rotary1Counter - lastMenuRotary1;
     if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
-      if (delta > 0) menuSubIndex += 1; else menuSubIndex -= 1;
+      if (now < menuNavIgnoreUntil) {
+        lastMenuRotary1 = rotary1Counter;
+        lastMenuNavTs = now;
+        return;
+      }
+
+      if (delta > 0) menuSubIndex++;
+      else menuSubIndex--;
       if (menuSubIndex < 0) menuSubIndex = 0;
-      if (menuSubIndex > 4) menuSubIndex = 4;
-      // consume all accumulated rotary delta (treat this as one nav step)
+      if (menuSubIndex > 2) menuSubIndex = 2;  // 3 options: Button Test, Shift Reg, Back
+
       lastMenuRotary1 = rotary1Counter;
       lastMenuNavTs = now;
+      menuNavIgnoreUntil = now + ROTARY_MENU_MIN_MS;
       lastMenuActivityTs = now;
-    }
-    switch (menuSubIndex) {
-      case 0: displayText("1.0run", "ALL   "); break;
-      case 1: displayText("1.1dISP", "tEst  "); break;
-      case 2: displayText("1.2LED ", "tEst  "); break;
-      case 3: displayText("1.3brt ", "tEst  "); break;
-      case 4: displayText("1.4ret", "urn   "); break;
     }
 
+    // Display submenu items
+    switch (menuSubIndex) {
+      case 0: displayText("bUtton ", "tESt  "); break;
+      case 1: displayText("ShIFt  ", "rEG   "); break;
+      case 2: displayText("bACK  ", "      "); break;
+    }
+
+    // XFER to execute or go back
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
-      lastXferPressed = true; lastXferPressTime = now;
-      lastMenuActivityTs = now;
+      lastXferPressed = true;
       lastXferHandledTs = now;
+      lastMenuActivityTs = now;
+
       if (menuSubIndex == 0) {
-        // Run full diag tests
-        // Request full diag test and return to menu afterwards
+        // Button Test
+        menuMode = 2;
+        readShiftRegisters(lastInputState1, lastInputState2);
+        diagStartTime = now;
+      } else if (menuSubIndex == 1) {
+        // Shift Register Test
+        menuMode = 3;
+      } else if (menuSubIndex == 2) {
+        // BACK to main menu
+        menuMode = 0;
+        menuInitialized = false;
+      }
+      return;
+    }
+    if (!xferPressed) lastXferPressed = false;
+    return;
+  }
+
+  // ===== INFO DISPLAY (menuMode == 5) =====
+  if (menuMode == 5) {
+    // Left display: PCB Version (e.g., "PCb 1.5")
+    // Right display: Aircraft Ident (e.g., "D-AIDA")
+    
+    String leftDisplay = CFG_PCB_VERSION;
+    // If too long, try to remove a single space to keep version digits
+    if (leftDisplay.length() > 6) {
+      int sp = leftDisplay.indexOf(' ');
+      if (sp >= 0) leftDisplay.remove(sp, 1);
+    }
+    while (leftDisplay.length() < 6) leftDisplay += " ";
+    if (leftDisplay.length() > 6) leftDisplay = leftDisplay.substring(0, 6);
+    
+    // Build right display: Aircraft Ident
+    String rightDisplay = CFG_AIRCRAFT_REG;
+    while (rightDisplay.length() < 6) rightDisplay += " ";
+    if (rightDisplay.length() > 6) rightDisplay = rightDisplay.substring(0, 6);
+    
+    // Display both
+    displayText(leftDisplay, rightDisplay);
+    
+    // Exit on XFER
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
+      lastXferPressed = true;
+      lastXferHandledTs = now;
+      menuMode = 0;
+      menuInitialized = false;
+      return;
+    }
+    if (!xferPressed) lastXferPressed = false;
+    return;
+  }
+
+  if (menuMode == 1) {
+    int delta = rotary1Counter - lastMenuRotary1;
+    if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
+      if (now < menuNavIgnoreUntil) {
+        lastMenuRotary1 = rotary1Counter;
+        lastMenuNavTs = now;
+        return;
+      }
+
+      if (delta > 0) menuSubIndex++;
+      else menuSubIndex--;
+      if (menuSubIndex < 0) menuSubIndex = 0;
+      if (menuSubIndex > 5) menuSubIndex = 5;  // 6 options: ALL, DISP, LED, SEG, BRIGHT, BACK
+
+      lastMenuRotary1 = rotary1Counter;
+      lastMenuNavTs = now;
+      menuNavIgnoreUntil = now + ROTARY_MENU_MIN_MS;
+      lastMenuActivityTs = now;
+    }
+
+    // Display submenu items
+    switch (menuSubIndex) {
+      case 0: displayText("RUN   ", "ALL   "); break;
+      case 1: displayText("dISPly", "tEst  "); break;
+      case 2: displayText("LED   ", "wALK  "); break;
+      case 3: displayText("SEG   ", "tESt  "); break;
+      case 4: displayText("bright", "nESS  "); break;
+      case 5: displayText("bACK  ", "      "); break;
+    }
+
+    // XFER to execute or go back
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
+      lastXferPressed = true;
+      lastXferHandledTs = now;
+      lastMenuActivityTs = now;
+
+      if (menuSubIndex == 0) {
+        // RUN ALL - the full diag sequence
         diagReturnToMenu = true;
         bootState = BOOT_DIAG_TEST;
         diagStartTime = millis();
         Serial.println("DIAG:FULL_START;");
         return;
-      }
-      else if (menuSubIndex == 1) {
-        // Run display counter test (reuse full diag display counter behaviour)
-        do_display_count_blocking(3000);
-        menuMode = 0; menuInitialized = false; // return to main menu
-        return;
-      }
-      else if (menuSubIndex == 2) {
-        // LED walking pattern short (reuse helper)
-        do_led_walk_blocking(3000);
-        menuMode = 0; menuInitialized = false; return;
-      }
-      else if (menuSubIndex == 3) {
-        // Brightness fade (reuse helper)
-        do_brightness_blocking(3000);
-        menuMode = 0; menuInitialized = false; return;
-      }
-      else if (menuSubIndex == 4) {
-        // return
-        menuMode = 0; menuInitialized = false; return;
-      }
-    }
-    if (!xferPressed) lastXferPressed = false;
-    return;
-  }
-
-  if (menuMode == 2) {
-    // Button test mode: show presses/releases
-    // When entering, clear display
-    if (menuInitialized) {
-      displayText("btn tE", "st    ");
-      menuInitialized = false; // only set initial text once
-    }
-
-    // detect any debounced button changes (use pendingChanged masks set during debounce)
-    uint8_t changed1 = pendingChanged1;
-    uint8_t changed2 = pendingChanged2;
-    if (changed1 || changed2) {
-      // find first changed bit in each register and show it
-      for (int b = 0; b < 8; b++) {
-        if (changed1 & (1 << b)) {
-          bool pressed = (lastInputState1 & (1 << b));
-          String left = "BTN" + String(b);
-          while (left.length() < 6) left += ' ';
-          String right = pressed ? "prESd " : "rELES ";
-          displayText(left, right);
-          break;
+      } else if (menuSubIndex == 1) {
+        // DISPLAY test - reuse the display count stage from runFullDiagSequence (~5 sec)
+        unsigned long t0 = millis();
+        setLEDState(0x0000, false, false, 0);
+        while (millis() - t0 < 5000) {
+          do_display_count_step(millis() - t0);
+          delay(80);
         }
-      }
-      for (int b = 0; b < 8; b++) {
-        if (changed2 & (1 << b)) {
-          bool pressed = (lastInputState2 & (1 << b));
-          String left = "BTN" + String(b+8);
-          while (left.length() < 6) left += ' ';
-          String right = pressed ? "prESd " : "rELES ";
-          displayText(left, right);
-          break;
+        displayText("      ", "      ");
+        menuMode = 0;
+        menuInitialized = false;
+      } else if (menuSubIndex == 2) {
+        // LED WALK test - reuse the LED walking pattern stage from runFullDiagSequence (~5 sec)
+        unsigned long t0 = millis();
+        displayText("LEd   ", "wALK  ");
+        delay(1000);
+        while (millis() - t0 < 5000) {
+          do_led_walk_step(millis() - t0 - 1000);
+          delay(100);
         }
+        setLEDState(0x0000, false, false, 0);
+        menuMode = 0;
+        menuInitialized = false;
+      } else if (menuSubIndex == 3) {
+        // SEGMENT test - reuse segment sweep from runFullDiagSequence (~5 sec)
+        unsigned long t0 = millis();
+        displayText("SEG   ", "tESt  ");
+        delay(1000);
+        setLEDState(0x0000, false, false, 128);
+        while (millis() - t0 < 5000) {
+          do_segment_sweep_step(millis() - t0);
+          delay(50);
+        }
+        displayText("      ", "      ");
+        menuMode = 0;
+        menuInitialized = false;
+      } else if (menuSubIndex == 4) {
+        // BRIGHTNESS test - reuse the EXACT brightness fade stage from runFullDiagSequence (~5 sec)
+        unsigned long t0 = millis();
+        displayText("brIGht", "tESt  ");
+        setLEDState(0xFFFF, true, true, 255);
+        
+        while (millis() - t0 < 5000) {
+          do_brightness_fade_step(millis() - t0);
+          delay(40);
+        }
+        
+        // Blank all LEDs explicitly
+        setLEDState(0x0000, false, false, 0);
+        Serial.println("LED1:00000000;LED2:00000000;LED3:00;");
+        
+        setDisplayBrightness(displayBrightness);
+        menuMode = 0;
+        menuInitialized = false;
+      } else if (menuSubIndex == 5) {
+        // BACK to main menu
+        menuMode = 0;
+        menuInitialized = false;
       }
-      // send immediate status for host
-      sendStatusImmediate();
-      lastMenuActivityTs = now;
-      // clear pending change masks after consumption
-      pendingChanged1 = 0;
-      pendingChanged2 = 0;
-    }
-
-    // Also show rotary encoder activity in button-test mode
-    int rt1Delta = rotary1Counter - lastRotary1Counter;
-    int rt2Delta = rotary2Counter - lastRotary2Counter;
-    if (rt1Delta != 0) {
-      String left = "RT1   ";
-      String right = (rt1Delta > 0) ? "UP    " : "DN    ";
-      displayText(left, right);
-      sendStatusImmediate();
-      lastRotary1Counter = rotary1Counter;
-      lastMenuActivityTs = now;
-    }
-    if (rt2Delta != 0) {
-      String left = "RT2   ";
-      String right = (rt2Delta > 0) ? "UP    " : "DN    ";
-      displayText(left, right);
-      sendStatusImmediate();
-      lastRotary2Counter = rotary2Counter;
-      lastMenuActivityTs = now;
-    }
-
-    // Double XFER to exit (check debounced state)
-    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
-      if (now - lastXferPressTime < 400) {
-        // double click -> exit
-        menuMode = 0; menuInitialized = false; lastXferPressed = true; lastXferHandledTs = now; return;
-      }
-      lastXferPressed = true; lastXferPressTime = now; lastXferHandledTs = now;
-    }
-    if (!xferPressed) lastXferPressed = false;
-    return;
-  }
-
-  if (menuMode == 3) {
-    // Show info: firmware and aircraft reg
-    String left = "FW:" + String("v1.0 ");
-    while (left.length() < 6) left += ' ';
-    String right = CFG_AIRCRAFT_REG;
-    while (right.length() < 6) right += ' ';
-    displayText(left, right);
-    // Exit back to main menu on XFER press
-    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
-      menuMode = 0; menuInitialized = false; lastXferPressed = true; lastXferHandledTs = now; return;
-    }
-    if (!xferPressed) lastXferPressed = false;
-    return;
-  }
-
-  if (menuMode == 4) {
-    // Settings menu: show current HW id and allow edit
-    if (menuInitialized) {
-      // Prepare edit buffer
-      for (int i = 0; i < 8; i++) {
-        if (i < CFG_AIRCRAFT_REG.length()) editReg[i] = CFG_AIRCRAFT_REG.charAt(i);
-        else editReg[i] = ' ';
-      }
-      editReg[8] = 0;
-      editPos = 0;
-      menuInitialized = false;
-    }
-
-    // Show settings title + current reg
-    String left = "SEttG ";
-    String right = String(editReg);
-    while (right.length() < 6) right += ' ';
-    displayText(left, right);
-
-    // Enter edit mode on XFER press (debounced)
-    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
-      lastXferPressed = true; lastXferPressTime = millis(); lastXferHandledTs = now;
-      // go to edit mode
-      menuMode = 5; // edit HW id
-      menuInitialized = true;
       return;
     }
     if (!xferPressed) lastXferPressed = false;
-    scrollTick(now);
     return;
   }
 
-  if (menuMode == 5) {
-    // Edit HW ID flow: editReg holds 8 chars, editPos selects char 0..7
-    if (menuInitialized) {
-      menuInitialized = false;
-      // ensure editPos in range
-      if (editPos < 0) editPos = 0;
-      if (editPos > 7) editPos = 7;
-    }
-
-    // Display current buffer (split across two displays)
-    String left = "ED: ";
-    String chunk1 = "      ";
-    String chunk2 = "      ";
-    // first 6 chars
-    for (int i = 0; i < 6; i++) {
-      if (i < 8) chunk1.setCharAt(i, editReg[i]);
-      else chunk1.setCharAt(i, ' ');
-    }
-    // last 2 chars + padding
-    for (int i = 0; i < 6; i++) {
-      int idx = 6 + i;
-      char c = (idx < 8) ? editReg[idx] : ' ';
-      chunk2.setCharAt(i, c);
-    }
-    displayText(left + " ", chunk1);
-
-    // Handle encoder to change current character
-    int delta = rotary1Counter - lastMenuRotary1;
-    if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
-      // Allowed charset: space, A-Z, 0-9, '-'
-      const char charset[] = " _ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"; // leading space as placeholder
-      int clen = strlen(charset);
-      // find current index
-      char cur = editReg[editPos];
-      int idx = 0;
-      for (int k = 0; k < clen; k++) if (charset[k] == cur) { idx = k; break; }
-      // only move one position per nav event to avoid multi-step jumps
-      int stepDir = (delta > 0) ? 1 : -1;
-      idx = (idx + stepDir) % clen;
-      if (idx < 0) idx += clen;
-      editReg[editPos] = charset[idx];
-      // consume all accumulated rotary delta (treat this as one nav step)
-      lastMenuRotary1 = rotary1Counter;
-      lastMenuNavTs = now;
-      lastMenuActivityTs = now;
-    }
-
-    // XFER advances to next char; when past end, save
-    bool xfer = ((inputState1 & BUTTON_XFER_MASK1) || (inputState2 & BUTTON_XFER_MASK2));
-    if (xfer && !lastXferPressed) {
-      lastXferPressed = true; lastXferPressTime = millis();
-      editPos++;
-      if (editPos > 7) {
-        // Save to CFG and EEPROM
-        String newReg = "";
-        for (int i = 0; i < 8; i++) if (editReg[i] != 0) newReg += editReg[i];
-        // trim trailing spaces
-        while (newReg.length() > 0 && newReg.charAt(newReg.length()-1) == ' ') newReg.remove(newReg.length()-1);
-        CFG_AIRCRAFT_REG = newReg;
-        saveHWInfo();
-        // show saved confirmation
-        displayText("SAVED ", "OK    ");
-        delay(800);
-        menuMode = 0; menuInitialized = false; return;
-      }
-      return;
-    }
-    if (!xfer) lastXferPressed = false;
-    scrollTick(now);
-    return;
-  }
-  // Ensure scrolling updates in other menu states as fallback
   scrollTick(now);
 }
 
@@ -1417,27 +1804,11 @@ void runFullDiagSequence() {
     setLEDState(0x0000, false, false, 0);
     displayText("dIAG  ", "StArt ");
   }
-    // Stage 1: Display count test - All LEDs OFF, digits count 0-9 with DP sweep (2000-7000ms)
+  // Stage 1: Display count test - All LEDs OFF, digits count 0-9 with DP sweep (2000-7000ms)
   else if (elapsed < 7000) {
-    int digit = ((elapsed - 2000) / 500) % 10;
-    int dpPos = ((elapsed - 2000) / 500) % 6;
-    
     // Keep ALL LEDs off during counting sequence
     setLEDState(0x0000, false, false, 0);
-    
-    String leftDisplay = "";
-    String rightDisplay = "";
-    
-    for (int i = 0; i < 6; i++) {
-      leftDisplay += String(digit);
-      rightDisplay += String(digit);
-      if (i == dpPos) {
-        leftDisplay += ".";
-        rightDisplay += ".";
-      }
-    }
-    
-    displayText(leftDisplay, rightDisplay);
+    do_display_count_step(elapsed - 2000);
   }
   // Stage 2: Full LED test - ALL LEDs ON (7000-10000ms)
   else if (elapsed < 10000) {
@@ -1473,31 +1844,17 @@ void runFullDiagSequence() {
   // Stage 4: LED driver test - walking LED pattern (15000-20000ms)
   else if (elapsed < 20000) {
     displayText("LEd   ", "tESt  ");
-    
-    // Walking bit pattern through all 16 LEDs
-    int ledIndex = ((elapsed - 15000) / 200) % 16;
-    uint16_t pattern = 1 << ledIndex;
-    setLEDState(pattern, ledIndex == 0, ledIndex == 1, 200);
+    do_led_walk_step(elapsed - 15000);
   }
   // Stage 5: MAX7219 segment test - light up each segment individually (20000-25000ms)
   else if (elapsed < 25000) {
     setLEDState(0x0000, false, false, 128);
     
-    // Show message for first 2 seconds, then clear and run actual test
+    // Show message for first 2 seconds, then run actual test
     if (elapsed < 22000) {
       displayText("SEG   ", "tESt  ");
     } else {
-      // Clear displays and run actual segment test
-      // Cycle through segments a-g plus DP (8 segments)
-      int segIndex = ((elapsed - 22000) / 300) % 8;
-      byte segPattern = 1 << segIndex;
-      
-      // Show same segment pattern on all digits of both displays
-      for (int dev = 0; dev < 2; dev++) {
-        for (int digit = 0; digit < 6; digit++) {
-          lc.setRow(dev, digit, segPattern);
-        }
-      }
+      do_segment_sweep_step(elapsed - 22000 + 1000);  // Offset so segment test starts after initial delay
     }
   }
   // Stage 6: Brightness test (25000-30000ms)
@@ -1505,14 +1862,8 @@ void runFullDiagSequence() {
     displayText("brIGht", "tESt  ");
     setLEDState(0xFFFF, true, true, 255);
     
-    // Fade brightness up and down
-    int fadePos = (elapsed - 25000) % 2000;
-    int brightness = (fadePos < 1000) ? (fadePos / 4) : (255 - ((fadePos - 1000) / 4));
-    
-    analogWrite(pwmBrightness, brightness);
-    for (int dev = 0; dev < 2; dev++) {
-      lc.setIntensity(dev, brightness / 17);  // 0-15 range
-    }
+    // Fade brightness up and down - reuse shared function
+    do_brightness_fade_step(elapsed - 25000);
   }
   // Stage 7: DIAG complete message (30000-33000ms)
   else if (elapsed < 33000) {
@@ -1527,6 +1878,11 @@ void runFullDiagSequence() {
     displayText("      ", "      ");
     if (diagReturnToMenu) {
       // return into DIAG menu instead of leaving diagnostics
+      // Blank LEDs and displays before returning to menu
+      setLEDState(0x0000, false, false, 0);
+      displayText("      ", "      ");
+      updateDisplay(DISP_LEFT, "      ");
+      updateDisplay(DISP_RIGHT, "      ");
       bootState = BOOT_DIAG_MENU;
       menuInitialized = false;
       diagReturnToMenu = false;
@@ -1595,6 +1951,54 @@ void do_brightness_blocking(unsigned long dur) {
   setDisplayBrightness(displayBrightness);
 }
 
+// Helper functions for test steps - shared between DIAG menu and full sequence
+void do_brightness_fade_step(unsigned long elapsed) {
+  int fadePos = elapsed % 2000;
+  int brightness = (fadePos < 1000) ? (fadePos / 4) : (255 - ((fadePos - 1000) / 4));
+  
+  analogWrite(pwmBrightness, brightness);
+  for (int dev = 0; dev < 2; dev++) {
+    lc.setIntensity(dev, brightness / 17);  // 0-15 range
+  }
+}
+
+void do_display_count_step(unsigned long elapsed) {
+  int digit = (elapsed / 500) % 10;
+  int dpPos = (elapsed / 500) % 6;
+  
+  String leftDisplay = "";
+  String rightDisplay = "";
+  for (int i = 0; i < 6; i++) {
+    leftDisplay += String(digit);
+    rightDisplay += String(digit);
+    if (i == dpPos) {
+      leftDisplay += ".";
+      rightDisplay += ".";
+    }
+  }
+  displayText(leftDisplay, rightDisplay);
+}
+
+void do_led_walk_step(unsigned long elapsed) {
+  int ledIndex = (elapsed / 200) % 16;
+  uint16_t pattern = 1 << ledIndex;
+  setLEDState(pattern, ledIndex == 0, ledIndex == 1, 200);
+}
+
+void do_segment_sweep_step(unsigned long elapsed) {
+  // After 1000ms, start segment sweep
+  if (elapsed < 1000) {
+    return;
+  }
+  int segIndex = ((elapsed - 1000) / 300) % 8;
+  byte segPattern = 1 << segIndex;
+  for (int dev = 0; dev < 2; dev++) {
+    for (int digit = 0; digit < 6; digit++) {
+      lc.setRow(dev, digit, segPattern);
+    }
+  }
+}
+
 // Check for DIAG combo: IN1:00000010;IN2:00010001
 void checkDiagCombo() {
   bool comboActive = (inputState1 == 0b00000010 && inputState2 == 0b00010001);
@@ -1616,9 +2020,10 @@ void checkDiagCombo() {
 // SETUP
 // ============================================================================
 // ---------------------- EEPROM helpers -------------------------------------
-uint8_t calcCfgChecksum(uint8_t version, const char *reg8) {
+uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8) {
   uint16_t sum = version;
   for (int i = 0; i < 8; i++) sum += (uint8_t)reg8[i];
+  for (int i = 0; i < 8; i++) sum += (uint8_t)pcb8[i];
   return (uint8_t)(sum & 0xFF);
 }
 
@@ -1633,37 +2038,76 @@ void loadHWInfo() {
     Serial.print("CFG:EEPROM:VERSION_MISMATCH:"); Serial.println(ver);
     return;
   }
+  
+  // Read aircraft registration
   char regbuf[9];
   for (int i = 0; i < 8; i++) regbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+3+i);
   regbuf[8] = 0;
-  uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+11);
-  uint8_t cs = calcCfgChecksum(ver, regbuf);
+  
+  // Read PCB version
+  char pcbbuf[9];
+  for (int i = 0; i < 8; i++) pcbbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+11+i);
+  pcbbuf[8] = 0;
+  
+  uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+19);
+  uint8_t cs = calcCfgChecksum(ver, regbuf, pcbbuf);
   if (cs != storedCs) {
     Serial.println("CFG:EEPROM:CRC_FAIL;");
     return;
   }
-  // Build String, trim trailing spaces / zero
-  String s = "";
-  for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != '\\0' && regbuf[i] != ' ') s += regbuf[i];
-  if (s.length() > 0) CFG_AIRCRAFT_REG = s;
-  Serial.print("CFG:LOAD:REG="); Serial.println(CFG_AIRCRAFT_REG);
+  
+  // Build Strings, trim trailing spaces/zeros
+  String regStr = "";
+  for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') regStr += regbuf[i];
+  if (regStr.length() > 0) CFG_AIRCRAFT_REG = regStr;
+  
+  String pcbStr = "";
+  for (int i = 0; i < 8; i++) {
+    if (pcbbuf[i] == 0 || pcbbuf[i] == ' ') {
+      // Only trim trailing spaces
+      int j = i;
+      while (j < 8 && (pcbbuf[j] == 0 || pcbbuf[j] == ' ')) j++;
+      if (j >= 8) break;  // Rest is all spaces, stop here
+    }
+    pcbStr += pcbbuf[i];
+  }
+  // Trim trailing spaces manually
+  while (pcbStr.length() > 0 && pcbStr.charAt(pcbStr.length()-1) == ' ') {
+    pcbStr = pcbStr.substring(0, pcbStr.length()-1);
+  }
+  if (pcbStr.length() > 0) CFG_PCB_VERSION = pcbStr;
+  
+  Serial.print("CFG:LOAD:REG="); Serial.print(CFG_AIRCRAFT_REG);
+  Serial.print(";PCB="); Serial.println(CFG_PCB_VERSION);
 }
 
 void saveHWInfo() {
-  // prepare reg buffer (pad with spaces)
+  // Prepare buffers (pad with spaces)
   char regbuf[8];
   for (int i = 0; i < 8; i++) {
     if (i < CFG_AIRCRAFT_REG.length()) regbuf[i] = CFG_AIRCRAFT_REG.charAt(i);
     else regbuf[i] = ' ';
   }
+  
+  char pcbbuf[8];
+  for (int i = 0; i < 8; i++) {
+    if (i < CFG_PCB_VERSION.length()) pcbbuf[i] = CFG_PCB_VERSION.charAt(i);
+    else pcbbuf[i] = ' ';
+  }
+  
   uint16_t magic = EEPROM_MAGIC;
   EEPROM.update(EEPROM_BASE_ADDR + 0, (uint8_t)(magic & 0xFF));
   EEPROM.update(EEPROM_BASE_ADDR + 1, (uint8_t)((magic >> 8) & 0xFF));
   EEPROM.update(EEPROM_BASE_ADDR + 2, EEPROM_FORMAT_VERSION);
+  
   for (int i = 0; i < 8; i++) EEPROM.update(EEPROM_BASE_ADDR + 3 + i, (uint8_t)regbuf[i]);
-  uint8_t cs = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf);
-  EEPROM.update(EEPROM_BASE_ADDR + 11, cs);
-  Serial.print("CFG:SAVED:REG="); Serial.println(CFG_AIRCRAFT_REG);
+  for (int i = 0; i < 8; i++) EEPROM.update(EEPROM_BASE_ADDR + 11 + i, (uint8_t)pcbbuf[i]);
+  
+  uint8_t cs = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf, pcbbuf);
+  EEPROM.update(EEPROM_BASE_ADDR + 19, cs);
+  
+  Serial.print("CFG:SAVED:REG="); Serial.print(CFG_AIRCRAFT_REG);
+  Serial.print(";PCB="); Serial.println(CFG_PCB_VERSION);
 }
 
 void setup() {
@@ -1688,6 +2132,14 @@ void setup() {
   
   // Initialize displays
   initDisplays();
+
+  // Initialize button LED states
+  for (int i = 0; i < 16; i++) {
+    buttonLEDStates[i].currentBrightness = 0;
+    buttonLEDStates[i].targetBrightness = 0;
+    buttonLEDStates[i].fadeStartTs = 0;
+    buttonLEDStates[i].isFading = false;
+  }
 
   // Load persisted configuration from EEPROM (if present)
   loadHWInfo();
