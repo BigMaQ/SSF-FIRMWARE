@@ -190,6 +190,7 @@ unsigned long lastMenuActivityTs = 0;
 unsigned long lastMenuNavTs = 0;
 const unsigned long MENU_INACTIVITY_TIMEOUT_MS = 10000; // auto-exit menu after 10s inactivity
 const unsigned long MENU_NAV_DEBOUNCE_MS = 300; // minimum ms between menu nav steps to avoid oversensitivity
+unsigned long menuNavIgnoreUntil = 0; // short window after entering submenu to ignore accumulated rotary events
 
 // If a full diag test was requested from the menu, return to menu afterwards instead of running to BOOT_RUNNING
 bool diagReturnToMenu = false;
@@ -327,22 +328,62 @@ void displayText(const String &left, const String &right) {
   // Set full strings and prepare scroll state
   currentLeftFull = left;
   currentRightFull = right;
-  // Determine if scrolling is needed (count all characters including dots)
-  scrollLeftEnabled = (currentLeftFull.length() > 6);
-  scrollRightEnabled = (currentRightFull.length() > 6);
+  // Determine if scrolling is needed (count effective characters excluding '.' which are DP markers)
+  auto effectiveLength = [](const String &s) {
+    int cnt = 0;
+    for (int i = 0; i < s.length(); i++) if (s.charAt(i) != '.') cnt++;
+    return cnt;
+  };
+  scrollLeftEnabled = (effectiveLength(currentLeftFull) > 6);
+  scrollRightEnabled = (effectiveLength(currentRightFull) > 6);
   scrollOffsetLeft = 0;
   scrollOffsetRight = 0;
   lastScrollTs = millis();
 
-  // Compute initial window and update displays immediately
-  String leftWindow = "      ";
-  String rightWindow = "      ";
-  int ll = currentLeftFull.length();
-  int rl = currentRightFull.length();
-  for (int i = 0; i < 6; i++) {
-    if (i < ll) leftWindow.setCharAt(i, currentLeftFull.charAt(i)); else leftWindow.setCharAt(i, ' ');
-    if (i < rl) rightWindow.setCharAt(i, currentRightFull.charAt(i)); else rightWindow.setCharAt(i, ' ');
-  }
+  // Compute initial window and update displays immediately using display-character-aware windowing
+  auto buildWindow = [](const String &full, int offsetChars) {
+    String out = "      ";
+    int placed = 0;
+    bool lastHadChar = false;
+    for (int i = 0; i < full.length() && placed < 6; i++) {
+      char c = full.charAt(i);
+      if (c == '.') {
+        // decimal point applies to previous digit if any
+        if (placed > 0) {
+          // set DP on previous character (store as '.' after it, updateDisplay handles DP)
+          // we append '.' as marker to output by replacing next position if available
+          // we instead set the DP by inserting '.' into the stream right after previous char
+          // Find position in out to append '.' after last placed
+          int posToSet = placed - 1;
+          // if there's still room to represent the '.' as separate char, insert it after previous
+          // but to keep format simple, we won't shift characters; updateDisplay understands '.' as modifier
+          // so we will append '.' to the output by shifting remaining chars right if room
+          // This simplified implementation will ignore isolated leading DPs.
+        }
+        continue;
+      }
+      // skip until offsetChars characters passed
+      if (offsetChars > 0) {
+        offsetChars -= 1;
+        continue;
+      }
+      out.setCharAt(placed, c);
+      placed++;
+      // if next char is dot, include it as dot after the char in the output string if space permits
+      int nextIdx = i + 1;
+      if (nextIdx < full.length() && full.charAt(nextIdx) == '.' && placed < 6) {
+        // append dot as separate char after current placed char
+        out.setCharAt(placed, '.');
+        placed++;
+        i++; // consume dot
+      }
+    }
+    // fill rest with spaces
+    for (int j = placed; j < 6; j++) out.setCharAt(j, ' ');
+    return out;
+  };
+  String leftWindow = buildWindow(currentLeftFull, scrollOffsetLeft);
+  String rightWindow = buildWindow(currentRightFull, scrollOffsetRight);
   updateDisplay(DISP_LEFT, leftWindow);
   updateDisplay(DISP_RIGHT, rightWindow);
   displayLeft = leftWindow;
@@ -353,32 +394,56 @@ void displayText(const String &left, const String &right) {
 void scrollTick(unsigned long now) {
   if ((now - lastScrollTs) < SCROLL_INTERVAL_MS) return;
   lastScrollTs = now;
-
   bool updated = false;
+  auto effectiveLength = [](const String &s) {
+    int cnt = 0;
+    for (int i = 0; i < s.length(); i++) if (s.charAt(i) != '.') cnt++;
+    return cnt;
+  };
+  // Build window similar to displayText builder
+  auto buildWindow = [](const String &full, int offsetChars) {
+    String out = "      ";
+    int placed = 0;
+    for (int i = 0; i < full.length() && placed < 6; i++) {
+      char c = full.charAt(i);
+      if (c == '.') {
+        // DP attaches to previous if possible (we keep DP as separate char)
+        if (placed > 0 && placed < 6) {
+          out.setCharAt(placed, '.');
+          placed++;
+        }
+        continue;
+      }
+      if (offsetChars > 0) { offsetChars -= 1; continue; }
+      out.setCharAt(placed, c);
+      placed++;
+      int nextIdx = i + 1;
+      if (nextIdx < full.length() && full.charAt(nextIdx) == '.' && placed < 6) {
+        out.setCharAt(placed, '.');
+        placed++;
+        i++;
+      }
+    }
+    for (int j = placed; j < 6; j++) out.setCharAt(j, ' ');
+    return out;
+  };
+
   if (scrollLeftEnabled) {
-    int len = currentLeftFull.length();
-    int maxOffset = max(0, len - 6);
+    int elen = effectiveLength(currentLeftFull);
+    int maxOffset = max(0, elen - 6);
     scrollOffsetLeft++;
     if (scrollOffsetLeft > maxOffset) scrollOffsetLeft = 0;
-    String leftWindow = "      ";
-    for (int i = 0; i < 6; i++) {
-      int idx = scrollOffsetLeft + i;
-      if (idx < len) leftWindow.setCharAt(i, currentLeftFull.charAt(idx)); else leftWindow.setCharAt(i, ' ');
-    }
+    String leftWindow = buildWindow(currentLeftFull, scrollOffsetLeft);
     updateDisplay(DISP_LEFT, leftWindow);
     displayLeft = leftWindow;
     updated = true;
   }
   if (scrollRightEnabled) {
-    int len = currentRightFull.length();
-    int maxOffset = max(0, len - 6);
+    int elen = effectiveLength(currentRightFull);
+    int maxOffset = max(0, elen - 6);
     scrollOffsetRight++;
     if (scrollOffsetRight > maxOffset) scrollOffsetRight = 0;
-    String rightWindow = "      ";
-    for (int i = 0; i < 6; i++) {
-      int idx = scrollOffsetRight + i;
-      if (idx < len) rightWindow.setCharAt(i, currentRightFull.charAt(idx)); else rightWindow.setCharAt(i, ' ');
-    }
+    String rightWindow = buildWindow(currentRightFull, scrollOffsetRight);
     updateDisplay(DISP_RIGHT, rightWindow);
     displayRight = rightWindow;
     updated = true;
@@ -1001,6 +1066,13 @@ void runDiagMenu() {
   if (menuMode == 0) {
     int delta = rotary1Counter - lastMenuRotary1;
     if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
+      // ignore rotary events immediately after entering submenu/menu to avoid accidental extra steps
+      if (now < menuNavIgnoreUntil) {
+        // consume and ignore deltas
+        lastMenuRotary1 = rotary1Counter;
+        lastMenuNavTs = now;
+        return;
+      }
       // Move selection by delta sign (one step per nav debounce)
       if (delta > 0) menuIndex += 1;
       else menuIndex -= 1;
@@ -1041,6 +1113,9 @@ void runDiagMenu() {
       lastXferHandledTs = now;
       if (menuIndex == 0) {
         menuMode = 1; menuSubIndex = 0; menuInitialized = true; // enter run submenu
+        // ignore rotary events briefly to avoid accidental extra nav
+        menuNavIgnoreUntil = now + 250;
+        lastMenuRotary1 = rotary1Counter;
       } else if (menuIndex == 1) {
         // enter button test
         menuMode = 2; menuSubIndex = 0; menuInitialized = true;
@@ -1049,10 +1124,16 @@ void runDiagMenu() {
         lastRotary2Counter = rotary2Counter;
         prevInputState1 = lastInputState1;
         prevInputState2 = lastInputState2;
+        menuNavIgnoreUntil = now + 250;
+        lastMenuRotary1 = rotary1Counter;
       } else if (menuIndex == 2) {
         menuMode = 3; menuSubIndex = 0; menuInitialized = true; // show info
+        menuNavIgnoreUntil = now + 250;
+        lastMenuRotary1 = rotary1Counter;
       } else if (menuIndex == 3) {
         menuMode = 4; menuSubIndex = 0; menuInitialized = true; // settings
+        menuNavIgnoreUntil = now + 250;
+        lastMenuRotary1 = rotary1Counter;
       } else if (menuIndex == 4) {
         // Exit back to running - perform clean reset of display/LEDs
         setLEDState(0x0000, false, false, 0);
@@ -1106,45 +1187,19 @@ void runDiagMenu() {
         return;
       }
       else if (menuSubIndex == 1) {
-        // Run display-only test for a short duration
-        unsigned long t0 = millis();
-        unsigned long dur = 3000;
-        while (millis() - t0 < dur) {
-          // simple segment sweep
-          for (int seg = 0; seg < 8; seg++) {
-            byte p = (1 << seg);
-            for (int dev = 0; dev < 2; dev++) for (int d = 0; d < 6; d++) lc.setRow(dev, d, p);
-            delay(150);
-          }
-        }
-        displayText("      ", "      ");
+        // Run display counter test (reuse full diag display counter behaviour)
+        do_display_count_blocking(3000);
         menuMode = 0; menuInitialized = false; // return to main menu
         return;
       }
       else if (menuSubIndex == 2) {
-        // LED walking pattern short
-        unsigned long t0 = millis();
-        unsigned long dur = 3000;
-        while (millis() - t0 < dur) {
-          for (int i = 0; i < 16; i++) {
-            setLEDState(1 << i, i==0, i==1, 200);
-            delay(120);
-          }
-        }
-        setLEDState(0x0000, false, false, 0);
+        // LED walking pattern short (reuse helper)
+        do_led_walk_blocking(3000);
         menuMode = 0; menuInitialized = false; return;
       }
       else if (menuSubIndex == 3) {
-        // Brightness fade
-        unsigned long t0 = millis(); unsigned long dur = 3000;
-        while (millis() - t0 < dur) {
-          int pos = (millis() - t0) % 2000;
-          int b = (pos < 1000) ? (pos / 67) : (255 - ((pos - 1000) / 67));
-          analogWrite(pwmBrightness, b);
-          for (int dev = 0; dev < 2; dev++) lc.setIntensity(dev, b/17);
-          delay(40);
-        }
-        setDisplayBrightness(displayBrightness);
+        // Brightness fade (reuse helper)
+        do_brightness_blocking(3000);
         menuMode = 0; menuInitialized = false; return;
       }
       else if (menuSubIndex == 4) {
@@ -1483,6 +1538,61 @@ void runFullDiagSequence() {
     offlineMessageShown = false;
     Serial.println("DIAG:COMPLETE;");
   }
+}
+
+// Blocking helpers reused by menu submenu tests (short, user-invoked)
+void do_display_count_blocking(unsigned long dur) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < dur) {
+    unsigned long rel = millis() - t0;
+    int digit = (rel / 500) % 10;
+    int dpPos = (rel / 500) % 6;
+    String leftDisplay = "";
+    String rightDisplay = "";
+    for (int i = 0; i < 6; i++) {
+      leftDisplay += String(digit);
+      rightDisplay += String(digit);
+      if (i == dpPos) { leftDisplay += "."; rightDisplay += "."; }
+    }
+    displayText(leftDisplay, rightDisplay);
+    delay(80);
+  }
+  displayText("      ", "      ");
+}
+
+void do_led_walk_blocking(unsigned long dur) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < dur) {
+    for (int i = 0; i < 16 && (millis() - t0 < dur); i++) {
+      setLEDState(1 << i, i==0, i==1, 200);
+      delay(120);
+    }
+  }
+  setLEDState(0x0000, false, false, 0);
+}
+
+void do_segment_sweep_blocking(unsigned long dur) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < dur) {
+    for (int seg = 0; seg < 8 && (millis() - t0 < dur); seg++) {
+      byte p = (1 << seg);
+      for (int dev = 0; dev < 2; dev++) for (int d = 0; d < 6; d++) lc.setRow(dev, d, p);
+      delay(150);
+    }
+  }
+  displayText("      ", "      ");
+}
+
+void do_brightness_blocking(unsigned long dur) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < dur) {
+    int pos = (millis() - t0) % 2000;
+    int b = (pos < 1000) ? (pos / 67) : (255 - ((pos - 1000) / 67));
+    analogWrite(pwmBrightness, b);
+    for (int dev = 0; dev < 2; dev++) lc.setIntensity(dev, b/17);
+    delay(40);
+  }
+  setDisplayBrightness(displayBrightness);
 }
 
 // Check for DIAG combo: IN1:00000010;IN2:00010001
