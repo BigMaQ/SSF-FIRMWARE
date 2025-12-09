@@ -179,6 +179,15 @@ unsigned long lastXferPressTime = 0;
 const uint8_t BUTTON_XFER_MASK1 = 0x01; // default bit mask for XFER (can be adjusted)
 const uint8_t BUTTON_XFER_MASK2 = 0x00; // alternative mask in inputState2 if needed
 
+// Menu navigation timing / inactivity
+unsigned long lastMenuActivityTs = 0;
+unsigned long lastMenuNavTs = 0;
+const unsigned long MENU_INACTIVITY_TIMEOUT_MS = 10000; // auto-exit menu after 10s inactivity
+const unsigned long MENU_NAV_DEBOUNCE_MS = 120; // minimum ms between menu nav steps to avoid oversensitivity
+
+// If a full diag test was requested from the menu, return to menu afterwards instead of running to BOOT_RUNNING
+bool diagReturnToMenu = false;
+
 // ============================================================================
 // RUNTIME BUFFERS / FLAGS
 // ============================================================================
@@ -961,22 +970,35 @@ void runDiagMenu() {
     lastXferPressTime = 0;
     // Show heading for 2 seconds
     displayText("dIAG  ", "nnEnu ");
+    // initialize menu activity timers
+    lastMenuActivityTs = now;
+    lastMenuNavTs = now;
     return;
   }
 
   // Keep header visible for 2 seconds
   if ((now - diagStartTime) < 2000) return;
 
+  // Auto-exit menu after inactivity
+  if ((now - lastMenuActivityTs) >= MENU_INACTIVITY_TIMEOUT_MS) {
+    // exit to running state
+    bootState = BOOT_RUNNING;
+    menuInitialized = false;
+    return;
+  }
+
   // Main menu navigation
   if (menuMode == 0) {
     int delta = rotary1Counter - lastMenuRotary1;
-    if (delta != 0) {
-      // Move selection by delta sign
+    if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
+      // Move selection by delta sign (one step per nav debounce)
       if (delta > 0) menuIndex += 1;
       else menuIndex -= 1;
       if (menuIndex < 0) menuIndex = 0;
-      if (menuIndex > 3) menuIndex = 3;
+      if (menuIndex > 4) menuIndex = 4; // allow Exit as item 4
       lastMenuRotary1 = rotary1Counter;
+      lastMenuNavTs = now;
+      lastMenuActivityTs = now;
     }
 
     // Display menu entries (6-char per display)
@@ -993,6 +1015,9 @@ void runDiagMenu() {
       case 3:
         displayText("4.Sett", "G nnEn");
         break;
+      case 4:
+        displayText("5.Exit ", "toRUN ");
+        break;
     }
 
     // XFER (Enter) detection - rising edge (use debounced lastInputState)
@@ -1001,6 +1026,7 @@ void runDiagMenu() {
       // Handle enter
       lastXferPressed = true;
       lastXferPressTime = now;
+      lastMenuActivityTs = now;
       if (menuIndex == 0) {
         menuMode = 1; menuSubIndex = 0; menuInitialized = true; // enter run submenu
       } else if (menuIndex == 1) {
@@ -1009,6 +1035,11 @@ void runDiagMenu() {
         menuMode = 3; menuSubIndex = 0; menuInitialized = true; // show info
       } else if (menuIndex == 3) {
         menuMode = 4; menuSubIndex = 0; menuInitialized = true; // settings
+      } else if (menuIndex == 4) {
+        // Exit back to running
+        bootState = BOOT_RUNNING;
+        menuInitialized = false;
+        return;
       }
       return;
     }
@@ -1020,11 +1051,13 @@ void runDiagMenu() {
   if (menuMode == 1) {
     // Run LED test submenu
     int delta = rotary1Counter - lastMenuRotary1;
-    if (delta != 0) {
+    if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
       if (delta > 0) menuSubIndex += 1; else menuSubIndex -= 1;
       if (menuSubIndex < 0) menuSubIndex = 0;
       if (menuSubIndex > 4) menuSubIndex = 4;
       lastMenuRotary1 = rotary1Counter;
+      lastMenuNavTs = now;
+      lastMenuActivityTs = now;
     }
     switch (menuSubIndex) {
       case 0: displayText("1.0run", "ALL   "); break;
@@ -1037,8 +1070,11 @@ void runDiagMenu() {
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed) {
       lastXferPressed = true; lastXferPressTime = now;
+      lastMenuActivityTs = now;
       if (menuSubIndex == 0) {
         // Run full diag tests
+        // Request full diag test and return to menu afterwards
+        diagReturnToMenu = true;
         bootState = BOOT_DIAG_TEST;
         diagStartTime = millis();
         Serial.println("DIAG:FULL_START;");
@@ -1130,6 +1166,7 @@ void runDiagMenu() {
       }
       // send immediate status for host
       sendStatusImmediate();
+      lastMenuActivityTs = now;
     }
 
     // Also show rotary encoder activity in button-test mode
@@ -1141,6 +1178,7 @@ void runDiagMenu() {
       displayText(left, right);
       sendStatusImmediate();
       lastRotary1Counter = rotary1Counter;
+      lastMenuActivityTs = now;
     }
     if (rt2Delta != 0) {
       String left = "RT2   ";
@@ -1148,6 +1186,7 @@ void runDiagMenu() {
       displayText(left, right);
       sendStatusImmediate();
       lastRotary2Counter = rotary2Counter;
+      lastMenuActivityTs = now;
     }
 
     // Double XFER to exit (check debounced state)
@@ -1238,7 +1277,7 @@ void runDiagMenu() {
 
     // Handle encoder to change current character
     int delta = rotary1Counter - lastMenuRotary1;
-    if (delta != 0) {
+    if (delta != 0 && (now - lastMenuNavTs) >= MENU_NAV_DEBOUNCE_MS) {
       // Allowed charset: space, A-Z, 0-9, '-'
       const char charset[] = " _ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"; // leading space as placeholder
       int clen = strlen(charset);
@@ -1250,6 +1289,8 @@ void runDiagMenu() {
       if (idx < 0) idx += clen;
       editReg[editPos] = charset[idx];
       lastMenuRotary1 = rotary1Counter;
+      lastMenuNavTs = now;
+      lastMenuActivityTs = now;
     }
 
     // XFER advances to next char; when past end, save
@@ -1396,7 +1437,14 @@ void runFullDiagSequence() {
     setDisplayBrightness(displayBrightness);  // Restore user brightness setting
     setLEDState(0x0000, false, false, 0);
     displayText("      ", "      ");
-    bootState = BOOT_RUNNING;
+    if (diagReturnToMenu) {
+      // return into DIAG menu instead of leaving diagnostics
+      bootState = BOOT_DIAG_MENU;
+      menuInitialized = false;
+      diagReturnToMenu = false;
+    } else {
+      bootState = BOOT_RUNNING;
+    }
     diagComboWasActive = false;
     // Reset offline message state so it shows fresh after DIAG
     offlineMessageShown = false;
