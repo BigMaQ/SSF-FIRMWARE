@@ -3,6 +3,7 @@
 
 #include <LedControl.h>
 #include <EEPROM.h>
+#include <avr/wdt.h>
 
 // ============================================================================
 // PIN DEFINITIONS
@@ -131,6 +132,7 @@ uint16_t CFG_LED_REFRESH = 1200;      // LED refresh interval in ms, default 120
 uint16_t CFG_DISPLAY_REFRESH = 1200;  // Display refresh interval in ms, default 1200ms
 String CFG_AIRCRAFT_REG = "D-A320";   // Aircraft registration, default D-A320, max 8 chars
 String CFG_PCB_VERSION = "PCB 1.0";   // PCB version, default PCB 1.0, max 8 chars
+bool CFG_PCB_IS_12 = false;            // Helper flag: true if PCB version is 1.2
 
 // EEPROM storage layout for configuration
 const int EEPROM_BASE_ADDR = 0; // start address
@@ -370,6 +372,27 @@ uint8_t parseBin8(const String &s) {
   return v;
 }
 
+void refreshPCBVersionFlags() {
+  String pcbNorm = CFG_PCB_VERSION;
+  pcbNorm.toUpperCase();
+  pcbNorm.replace(" ", "");
+  CFG_PCB_IS_12 = (pcbNorm == "PCB1.2");
+}
+
+// Perform a fast software reset using the watchdog
+void triggerSoftwareReset(bool showMessage = true) {
+  if (showMessage) {
+    displayText("rESEt", "triGGt");
+    delay(1000);
+  }
+  Serial.flush();
+  delay(50);
+  wdt_enable(WDTO_15MS);
+  while (true) {
+    // Wait for watchdog to trigger
+  }
+}
+
 uint16_t parseBin16(const String &s) {
   uint16_t v = 0;
   for (int i = 0; i < s.length(); i++) {
@@ -587,8 +610,15 @@ void shiftOutLEDs(uint16_t ledBits) {
 
 void applyLEDOutputs() {
   shiftOutLEDs(desiredLedState);
-  digitalWrite(ledIlsSel, desiredIlsLed ? HIGH : LOW);
-  digitalWrite(ledMlsSel, desiredMlsLed ? HIGH : LOW);
+  bool ilsOut = desiredIlsLed;
+  bool mlsOut = desiredMlsLed;
+  if (CFG_PCB_IS_12) {
+    // PCB 1.2 uses inverted logic on LED3 lines
+    ilsOut = !ilsOut;
+    mlsOut = !mlsOut;
+  }
+  digitalWrite(ledIlsSel, ilsOut ? HIGH : LOW);
+  digitalWrite(ledMlsSel, mlsOut ? HIGH : LOW);
   analogWrite(pwmBrightness, desiredBrightness);
   
   hwLedState = desiredLedState;
@@ -957,6 +987,7 @@ void processIncomingLine(const String &line) {
           
           if (major >= 1 && major <= 9 && minor >= 0 && minor <= 9) {
             CFG_PCB_VERSION = String("PCb ") + major + "." + minor;
+            refreshPCBVersionFlags();
             Serial.println("SET FW:OK ;");
           } else {
             Serial.println("SET FW:RANGE ;");
@@ -1012,6 +1043,7 @@ void processIncomingLine(const String &line) {
           saveHWInfo();
           settingsEnabled = false;
           Serial.println("SET WRI:OK ;");
+          triggerSoftwareReset();
         } else {
           Serial.println("SET WRI:FORMAT ;");
         }
@@ -1070,6 +1102,11 @@ void processSerialTokensFromHost() {
         sendIdentAndState();
         identSentOnStart = true;
         pauseUntil = millis() + 200;
+        continue;
+      }
+      if (tokenUp == "RESET") {
+        Serial.println("RESET:OK ;");
+        triggerSoftwareReset();
         continue;
       }
       if (tokenUp == "REQ") {
@@ -2076,6 +2113,7 @@ void loadHWInfo() {
     pcbStr = pcbStr.substring(0, pcbStr.length()-1);
   }
   if (pcbStr.length() > 0) CFG_PCB_VERSION = pcbStr;
+  refreshPCBVersionFlags();
   
   Serial.print("CFG:LOAD:REG="); Serial.print(CFG_AIRCRAFT_REG);
   Serial.print(";PCB="); Serial.println(CFG_PCB_VERSION);
@@ -2111,6 +2149,7 @@ void saveHWInfo() {
 }
 
 void setup() {
+  wdt_disable();
   Serial.begin(115200);
   
   // Pin modes
@@ -2143,10 +2182,9 @@ void setup() {
 
   // Load persisted configuration from EEPROM (if present)
   loadHWInfo();
+  refreshPCBVersionFlags();
   
   // Initialize LEDs off (including direct LEDs)
-  digitalWrite(ledIlsSel, LOW);
-  digitalWrite(ledMlsSel, LOW);
   setLEDState(0x0000, false, false, 0);
   
   // Use polling for both rotary encoders (more consistent behavior)
