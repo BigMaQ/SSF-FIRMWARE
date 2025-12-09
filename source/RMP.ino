@@ -75,6 +75,16 @@ String displayLeft  = "      ";  // 6 chars for left display
 String displayRight = "      ";  // 6 chars for right display
 uint8_t displayBrightness = 15;  // MAX7219 brightness (0-15), default full
 
+// Scrolling support for displays: hold full strings and scroll window if >6 chars
+String currentLeftFull = "";
+String currentRightFull = "";
+int scrollOffsetLeft = 0;
+int scrollOffsetRight = 0;
+unsigned long lastScrollTs = 0;
+const unsigned long SCROLL_INTERVAL_MS = 300; // default scroll speed
+bool scrollLeftEnabled = false;
+bool scrollRightEnabled = false;
+
 // ============================================================================
 // INPUT STATE (shift registers)
 // ============================================================================
@@ -299,17 +309,66 @@ void updateDisplay(int device, const String &text) {
 }
 
 void displayText(const String &left, const String &right) {
-  // Remove decimal points from length calculation (they're merged with prev digit)
-  String leftClean = left;
-  String rightClean = right;
-  leftClean.replace(".", "");
-  rightClean.replace(".", "");
-  
-  updateDisplay(DISP_LEFT, left);
-  updateDisplay(DISP_RIGHT, right);
-  
-  displayLeft = left;
-  displayRight = right;
+  // Set full strings and prepare scroll state
+  currentLeftFull = left;
+  currentRightFull = right;
+  // Determine if scrolling is needed (count all characters including dots)
+  scrollLeftEnabled = (currentLeftFull.length() > 6);
+  scrollRightEnabled = (currentRightFull.length() > 6);
+  scrollOffsetLeft = 0;
+  scrollOffsetRight = 0;
+  lastScrollTs = millis();
+
+  // Compute initial window and update displays immediately
+  String leftWindow = "      ";
+  String rightWindow = "      ";
+  int ll = currentLeftFull.length();
+  int rl = currentRightFull.length();
+  for (int i = 0; i < 6; i++) {
+    if (i < ll) leftWindow.setCharAt(i, currentLeftFull.charAt(i)); else leftWindow.setCharAt(i, ' ');
+    if (i < rl) rightWindow.setCharAt(i, currentRightFull.charAt(i)); else rightWindow.setCharAt(i, ' ');
+  }
+  updateDisplay(DISP_LEFT, leftWindow);
+  updateDisplay(DISP_RIGHT, rightWindow);
+  displayLeft = leftWindow;
+  displayRight = rightWindow;
+}
+
+// Advance scroll offsets if needed and refresh displays
+void scrollTick(unsigned long now) {
+  if ((now - lastScrollTs) < SCROLL_INTERVAL_MS) return;
+  lastScrollTs = now;
+
+  bool updated = false;
+  if (scrollLeftEnabled) {
+    int len = currentLeftFull.length();
+    int maxOffset = max(0, len - 6);
+    scrollOffsetLeft++;
+    if (scrollOffsetLeft > maxOffset) scrollOffsetLeft = 0;
+    String leftWindow = "      ";
+    for (int i = 0; i < 6; i++) {
+      int idx = scrollOffsetLeft + i;
+      if (idx < len) leftWindow.setCharAt(i, currentLeftFull.charAt(idx)); else leftWindow.setCharAt(i, ' ');
+    }
+    updateDisplay(DISP_LEFT, leftWindow);
+    displayLeft = leftWindow;
+    updated = true;
+  }
+  if (scrollRightEnabled) {
+    int len = currentRightFull.length();
+    int maxOffset = max(0, len - 6);
+    scrollOffsetRight++;
+    if (scrollOffsetRight > maxOffset) scrollOffsetRight = 0;
+    String rightWindow = "      ";
+    for (int i = 0; i < 6; i++) {
+      int idx = scrollOffsetRight + i;
+      if (idx < len) rightWindow.setCharAt(i, currentRightFull.charAt(idx)); else rightWindow.setCharAt(i, ' ');
+    }
+    updateDisplay(DISP_RIGHT, rightWindow);
+    displayRight = rightWindow;
+    updated = true;
+  }
+  // if updated, nothing else to do (displays refreshed)
 }
 
 // ============================================================================
@@ -872,6 +931,25 @@ void reactivateOfflineMessage() {
 // ============================================================================
 void runDiagMenu() {
   unsigned long now = millis();
+  // While in DIAG menu we still need to poll inputs and encoders so the menu is responsive
+  readShiftRegisters(inputState1, inputState2);
+  updateRotary1();
+  updateRotary2();
+
+  // Simple debounce so menu reacts to stable button presses (reuse same debounce variables)
+  if (inputState1 != lastInputState1 || inputState2 != lastInputState2) {
+    if (now - lastDebounceTs >= CFG_BUTTON_DEBOUNCE) {
+      lastDebounceTs = now;
+      lastInputState1 = inputState1;
+      lastInputState2 = inputState2;
+      // notify offline message reactivation similarly to main loop
+      if (lastInputState1 != prevInputState1 || lastInputState2 != prevInputState2) {
+        reactivateOfflineMessage();
+        prevInputState1 = lastInputState1;
+        prevInputState2 = lastInputState2;
+      }
+    }
+  }
   // Initialize menu on first entry
   if (!menuInitialized) {
     menuInitialized = true;
@@ -904,7 +982,7 @@ void runDiagMenu() {
     // Display menu entries (6-char per display)
     switch (menuIndex) {
       case 0:
-        displayText("1.run ", "LEd tE");
+        displayText("1. LED ", "tESt  ");
         break;
       case 1:
         displayText("2.btn ", "tESt  ");
@@ -917,8 +995,8 @@ void runDiagMenu() {
         break;
     }
 
-    // XFER (Enter) detection - rising edge
-    bool xferPressed = ((inputState1 & BUTTON_XFER_MASK1) || (inputState2 & BUTTON_XFER_MASK2));
+    // XFER (Enter) detection - rising edge (use debounced lastInputState)
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed) {
       // Handle enter
       lastXferPressed = true;
@@ -956,7 +1034,7 @@ void runDiagMenu() {
       case 4: displayText("1.4ret", "urn   "); break;
     }
 
-    bool xferPressed = ((inputState1 & BUTTON_XFER_MASK1) || (inputState2 & BUTTON_XFER_MASK2));
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed) {
       lastXferPressed = true; lastXferPressTime = now;
       if (menuSubIndex == 0) {
@@ -1026,13 +1104,13 @@ void runDiagMenu() {
     }
 
     // detect any button changes and show which button
-    uint8_t changed1 = inputState1 ^ prevInputState1;
-    uint8_t changed2 = inputState2 ^ prevInputState2;
+    uint8_t changed1 = lastInputState1 ^ prevInputState1;
+    uint8_t changed2 = lastInputState2 ^ prevInputState2;
     if (changed1 || changed2) {
       // find first changed bit
       for (int b = 0; b < 8; b++) {
         if (changed1 & (1 << b)) {
-          bool pressed = (inputState1 & (1 << b));
+          bool pressed = (lastInputState1 & (1 << b));
           String left = "BTN" + String(b);
           while (left.length() < 6) left += ' ';
           String right = pressed ? "prESd " : "rELES ";
@@ -1042,7 +1120,7 @@ void runDiagMenu() {
       }
       for (int b = 0; b < 8; b++) {
         if (changed2 & (1 << b)) {
-          bool pressed = (inputState2 & (1 << b));
+          bool pressed = (lastInputState2 & (1 << b));
           String left = "BTN" + String(b+8);
           while (left.length() < 6) left += ' ';
           String right = pressed ? "prESd " : "rELES ";
@@ -1072,8 +1150,8 @@ void runDiagMenu() {
       lastRotary2Counter = rotary2Counter;
     }
 
-    // Double XFER to exit
-    bool xferPressed = ((inputState1 & BUTTON_XFER_MASK1) || (inputState2 & BUTTON_XFER_MASK2));
+    // Double XFER to exit (check debounced state)
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed) {
       if (now - lastXferPressTime < 400) {
         // double click -> exit
@@ -1093,7 +1171,7 @@ void runDiagMenu() {
     while (right.length() < 6) right += ' ';
     displayText(left, right);
     // Exit back to main menu on XFER press
-    bool xferPressed = ((inputState1 & BUTTON_XFER_MASK1) || (inputState2 & BUTTON_XFER_MASK2));
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed) { menuMode = 0; menuInitialized = false; lastXferPressed = true; return; }
     if (!xferPressed) lastXferPressed = false;
     return;
@@ -1118,8 +1196,8 @@ void runDiagMenu() {
     while (right.length() < 6) right += ' ';
     displayText(left, right);
 
-    // Enter edit mode on XFER press
-    bool xferPressed = ((inputState1 & BUTTON_XFER_MASK1) || (inputState2 & BUTTON_XFER_MASK2));
+    // Enter edit mode on XFER press (debounced)
+    bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
     if (xferPressed && !lastXferPressed) {
       lastXferPressed = true; lastXferPressTime = millis();
       // go to edit mode
@@ -1128,6 +1206,7 @@ void runDiagMenu() {
       return;
     }
     if (!xferPressed) lastXferPressed = false;
+    scrollTick(now);
     return;
   }
 
@@ -1194,8 +1273,11 @@ void runDiagMenu() {
       return;
     }
     if (!xfer) lastXferPressed = false;
+    scrollTick(now);
     return;
   }
+  // Ensure scrolling updates in other menu states as fallback
+  scrollTick(now);
 }
 
 void runFullDiagSequence() {
