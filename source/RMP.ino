@@ -179,11 +179,15 @@ unsigned long lastXferPressTime = 0;
 const uint8_t BUTTON_XFER_MASK1 = 0x01; // default bit mask for XFER (can be adjusted)
 const uint8_t BUTTON_XFER_MASK2 = 0x00; // alternative mask in inputState2 if needed
 
+// XFER handling guard to avoid double registration
+unsigned long lastXferHandledTs = 0;
+const unsigned long XFER_IGNORE_MS = 250; // ignore new XFER events within 250ms of handling
+
 // Menu navigation timing / inactivity
 unsigned long lastMenuActivityTs = 0;
 unsigned long lastMenuNavTs = 0;
 const unsigned long MENU_INACTIVITY_TIMEOUT_MS = 10000; // auto-exit menu after 10s inactivity
-const unsigned long MENU_NAV_DEBOUNCE_MS = 120; // minimum ms between menu nav steps to avoid oversensitivity
+const unsigned long MENU_NAV_DEBOUNCE_MS = 200; // minimum ms between menu nav steps to avoid oversensitivity
 
 // If a full diag test was requested from the menu, return to menu afterwards instead of running to BOOT_RUNNING
 bool diagReturnToMenu = false;
@@ -1022,11 +1026,12 @@ void runDiagMenu() {
 
     // XFER (Enter) detection - rising edge (use debounced lastInputState)
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed) {
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
       // Handle enter
       lastXferPressed = true;
       lastXferPressTime = now;
       lastMenuActivityTs = now;
+      lastXferHandledTs = now;
       if (menuIndex == 0) {
         menuMode = 1; menuSubIndex = 0; menuInitialized = true; // enter run submenu
       } else if (menuIndex == 1) {
@@ -1068,9 +1073,10 @@ void runDiagMenu() {
     }
 
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed) {
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
       lastXferPressed = true; lastXferPressTime = now;
       lastMenuActivityTs = now;
+      lastXferHandledTs = now;
       if (menuSubIndex == 0) {
         // Run full diag tests
         // Request full diag test and return to menu afterwards
@@ -1191,12 +1197,12 @@ void runDiagMenu() {
 
     // Double XFER to exit (check debounced state)
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed) {
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
       if (now - lastXferPressTime < 400) {
         // double click -> exit
-        menuMode = 0; menuInitialized = false; lastXferPressed = false; return;
+        menuMode = 0; menuInitialized = false; lastXferPressed = true; lastXferHandledTs = now; return;
       }
-      lastXferPressed = true; lastXferPressTime = now;
+      lastXferPressed = true; lastXferPressTime = now; lastXferHandledTs = now;
     }
     if (!xferPressed) lastXferPressed = false;
     return;
@@ -1211,7 +1217,9 @@ void runDiagMenu() {
     displayText(left, right);
     // Exit back to main menu on XFER press
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed) { menuMode = 0; menuInitialized = false; lastXferPressed = true; return; }
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
+      menuMode = 0; menuInitialized = false; lastXferPressed = true; lastXferHandledTs = now; return;
+    }
     if (!xferPressed) lastXferPressed = false;
     return;
   }
@@ -1237,8 +1245,8 @@ void runDiagMenu() {
 
     // Enter edit mode on XFER press (debounced)
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
-    if (xferPressed && !lastXferPressed) {
-      lastXferPressed = true; lastXferPressTime = millis();
+    if (xferPressed && !lastXferPressed && (now - lastXferHandledTs) >= XFER_IGNORE_MS) {
+      lastXferPressed = true; lastXferPressTime = millis(); lastXferHandledTs = now;
       // go to edit mode
       menuMode = 5; // edit HW id
       menuInitialized = true;
