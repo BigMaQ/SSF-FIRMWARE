@@ -94,6 +94,8 @@ uint8_t lastInputState1 = 0x00;
 uint8_t lastInputState2 = 0x00;
 uint8_t prevInputState1 = 0x00;  // Track previous state to detect actual changes
 uint8_t prevInputState2 = 0x00;
+uint8_t pendingChanged1 = 0x00; // changes detected at debounce time, consumed by menu tests
+uint8_t pendingChanged2 = 0x00;
 
 // ============================================================================
 // ROTARY ENCODER STATE
@@ -187,7 +189,7 @@ const unsigned long XFER_IGNORE_MS = 250; // ignore new XFER events within 250ms
 unsigned long lastMenuActivityTs = 0;
 unsigned long lastMenuNavTs = 0;
 const unsigned long MENU_INACTIVITY_TIMEOUT_MS = 10000; // auto-exit menu after 10s inactivity
-const unsigned long MENU_NAV_DEBOUNCE_MS = 200; // minimum ms between menu nav steps to avoid oversensitivity
+const unsigned long MENU_NAV_DEBOUNCE_MS = 300; // minimum ms between menu nav steps to avoid oversensitivity
 
 // If a full diag test was requested from the menu, return to menu afterwards instead of running to BOOT_RUNNING
 bool diagReturnToMenu = false;
@@ -953,13 +955,17 @@ void runDiagMenu() {
   if (inputState1 != lastInputState1 || inputState2 != lastInputState2) {
     if (now - lastDebounceTs >= CFG_BUTTON_DEBOUNCE) {
       lastDebounceTs = now;
+      // record previous stable state, then update last stable state
+      prevInputState1 = lastInputState1;
+      prevInputState2 = lastInputState2;
       lastInputState1 = inputState1;
       lastInputState2 = inputState2;
-      // notify offline message reactivation similarly to main loop
-      if (lastInputState1 != prevInputState1 || lastInputState2 != prevInputState2) {
+      // store pending changed masks for menu tests to consume
+      pendingChanged1 = lastInputState1 ^ prevInputState1;
+      pendingChanged2 = lastInputState2 ^ prevInputState2;
+      // notify offline message reactivation if anything actually changed
+      if (pendingChanged1 || pendingChanged2) {
         reactivateOfflineMessage();
-        prevInputState1 = lastInputState1;
-        prevInputState2 = lastInputState2;
       }
     }
   }
@@ -1000,6 +1006,7 @@ void runDiagMenu() {
       else menuIndex -= 1;
       if (menuIndex < 0) menuIndex = 0;
       if (menuIndex > 4) menuIndex = 4; // allow Exit as item 4
+      // consume all accumulated rotary delta (treat this as one nav step)
       lastMenuRotary1 = rotary1Counter;
       lastMenuNavTs = now;
       lastMenuActivityTs = now;
@@ -1035,13 +1042,24 @@ void runDiagMenu() {
       if (menuIndex == 0) {
         menuMode = 1; menuSubIndex = 0; menuInitialized = true; // enter run submenu
       } else if (menuIndex == 1) {
-        menuMode = 2; menuSubIndex = 0; menuInitialized = true; // enter button test
+        // enter button test
+        menuMode = 2; menuSubIndex = 0; menuInitialized = true;
+        // ensure button test starts with cleared states
+        lastRotary1Counter = rotary1Counter;
+        lastRotary2Counter = rotary2Counter;
+        prevInputState1 = lastInputState1;
+        prevInputState2 = lastInputState2;
       } else if (menuIndex == 2) {
         menuMode = 3; menuSubIndex = 0; menuInitialized = true; // show info
       } else if (menuIndex == 3) {
         menuMode = 4; menuSubIndex = 0; menuInitialized = true; // settings
       } else if (menuIndex == 4) {
-        // Exit back to running
+        // Exit back to running - perform clean reset of display/LEDs
+        setLEDState(0x0000, false, false, 0);
+        displayText("      ", "      ");
+        updateDisplay(DISP_LEFT, "      ");
+        updateDisplay(DISP_RIGHT, "      ");
+        forceSendNext = true;
         bootState = BOOT_RUNNING;
         menuInitialized = false;
         return;
@@ -1060,6 +1078,7 @@ void runDiagMenu() {
       if (delta > 0) menuSubIndex += 1; else menuSubIndex -= 1;
       if (menuSubIndex < 0) menuSubIndex = 0;
       if (menuSubIndex > 4) menuSubIndex = 4;
+      // consume all accumulated rotary delta (treat this as one nav step)
       lastMenuRotary1 = rotary1Counter;
       lastMenuNavTs = now;
       lastMenuActivityTs = now;
@@ -1145,11 +1164,11 @@ void runDiagMenu() {
       menuInitialized = false; // only set initial text once
     }
 
-    // detect any button changes and show which button
-    uint8_t changed1 = lastInputState1 ^ prevInputState1;
-    uint8_t changed2 = lastInputState2 ^ prevInputState2;
+    // detect any debounced button changes (use pendingChanged masks set during debounce)
+    uint8_t changed1 = pendingChanged1;
+    uint8_t changed2 = pendingChanged2;
     if (changed1 || changed2) {
-      // find first changed bit
+      // find first changed bit in each register and show it
       for (int b = 0; b < 8; b++) {
         if (changed1 & (1 << b)) {
           bool pressed = (lastInputState1 & (1 << b));
@@ -1173,6 +1192,9 @@ void runDiagMenu() {
       // send immediate status for host
       sendStatusImmediate();
       lastMenuActivityTs = now;
+      // clear pending change masks after consumption
+      pendingChanged1 = 0;
+      pendingChanged2 = 0;
     }
 
     // Also show rotary encoder activity in button-test mode
@@ -1293,9 +1315,12 @@ void runDiagMenu() {
       char cur = editReg[editPos];
       int idx = 0;
       for (int k = 0; k < clen; k++) if (charset[k] == cur) { idx = k; break; }
-      idx = (idx + delta) % clen;
+      // only move one position per nav event to avoid multi-step jumps
+      int stepDir = (delta > 0) ? 1 : -1;
+      idx = (idx + stepDir) % clen;
       if (idx < 0) idx += clen;
       editReg[editPos] = charset[idx];
+      // consume all accumulated rotary delta (treat this as one nav step)
       lastMenuRotary1 = rotary1Counter;
       lastMenuNavTs = now;
       lastMenuActivityTs = now;
