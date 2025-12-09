@@ -556,7 +556,7 @@ void processIncomingLine(const String &line) {
       }
       if (token.equalsIgnoreCase("DIAG")) {
         if (bootState == BOOT_RUNNING) {
-          bootState = BOOT_DIAG;
+          bootState = BOOT_DIAG_MENU;
           diagStartTime = millis();
           diagStage = 0;
           Serial.println("DIAG:START;");
@@ -1328,7 +1328,7 @@ void checkDiagCombo() {
   
   // Trigger DIAG only on rising edge (combo just pressed, not held)
   if (bootState == BOOT_RUNNING && comboActive && !diagComboWasActive) {
-    bootState = BOOT_DIAG;
+    bootState = BOOT_DIAG_MENU;
     diagStartTime = millis();
     diagStage = 0;
     Serial.println("DIAG:START;");
