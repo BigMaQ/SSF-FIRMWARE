@@ -1033,6 +1033,10 @@ void processIncomingLine(const String &line) {
           Serial.println("SET ACID:FORMAT ;");
         }
       }
+      else if (setCmd.startsWith("EXIT")) {
+        settingsEnabled = false;
+        Serial.println("SET EXIT:OK ;");
+      }
       else if (setCmd.startsWith("WRI:") && settingsEnabled) {
         // Write to EEPROM: SET WRI:YES
         String cmd = setCmd.substring(4);
@@ -1102,6 +1106,29 @@ void processSerialTokensFromHost() {
         sendIdentAndState();
         identSentOnStart = true;
         pauseUntil = millis() + 200;
+        continue;
+      }
+      if (tokenUp == "EXIT") {
+        settingsEnabled = false;
+        Serial.println("EXIT:OK ;");
+        continue;
+      }
+      if (tokenUp == "PCB") {
+        // Query PCB version from EEPROM
+        Serial.print("PCB:");
+        // Extract major.minor from CFG_PCB_VERSION (e.g., "PCB 1.2" -> "v1.2")
+        String pcbVer = CFG_PCB_VERSION;
+        pcbVer.trim();
+        // Find the space and take everything after it
+        int spacePos = pcbVer.indexOf(' ');
+        if (spacePos >= 0 && spacePos < pcbVer.length() - 1) {
+          String digits = pcbVer.substring(spacePos + 1);
+          Serial.print("v");
+          Serial.print(digits);
+        } else {
+          Serial.print(pcbVer);
+        }
+        Serial.println(" ;");
         continue;
       }
       if (tokenUp == "RESET") {
