@@ -234,6 +234,15 @@ byte charTo7Seg(char c){
     case '9': return 0b01111011; case 'A': return 0b01110111; case 'B': return 0b00011111;
     case 'C': return 0b01001110; case 'D': return 0b00111101; case 'E': return 0b01001111;
     case 'F': return 0b01000111; case 'H': return 0b00110111; case 'U': return 0b00111110;
+    case 'S': return 0b01011011; // S approximated by digit 5
+    case 'L': return 0b00001110; // L
+    case 'I': return 0b00110000; // I approximated by 1
+    case 'G': return 0b01011110; // G like '6' without middle (lower-right on, upper-right off)
+    case 'O': return 0b01111110; // O like 0 without middle
+    case 'P': return 0b01100111; // P
+    case 'Y': return 0b00111001; // Y
+    case 'N': return 0b00110111; // N approximated (similar to H)
+    case 'M': return 0b00110111; // M approximated (reuse H pattern)
     case 'T': return 0b00001111; case 'R': return 0b00000101; case '-': return 0b00000001;
     case ' ': return 0b00000000; default: return 0b00000000;
   }
@@ -326,6 +335,48 @@ void diagLedWalkStep(unsigned long elapsed){
     desiredGpioLed2 = (1 << (7 - idx));
   }
   applyOutputs();
+
+  // Update displays to show current LED byte and value
+  // Top (CHR): LEDx where x=1..7 (active byte)
+  // Middle (UTC): two-digit HEX value of the active byte
+  // Lower (ET): "tE5t" (7-seg friendly for tESt)
+  int activeLedByte = 0; // 1..7
+  uint8_t activeValue = 0x00;
+
+  if(step < 16){
+    // BRK 16-bit -> LED1 (high), LED2 (low)
+    uint8_t hi = (desiredBrkLed >> 8) & 0xFF;
+    uint8_t lo = desiredBrkLed & 0xFF;
+    if(hi) { activeLedByte = 1; activeValue = hi; }
+    else   { activeLedByte = 2; activeValue = lo; }
+  } else if(step < 40){
+    // Backlight 24-bit -> LED5 (MSB), LED6, LED7 (LSB)
+    uint8_t b2 = (desiredBlLed >> 16) & 0xFF; // LED5
+    uint8_t b1 = (desiredBlLed >> 8)  & 0xFF; // LED6
+    uint8_t b0 = (desiredBlLed)       & 0xFF; // LED7
+    if(b2){ activeLedByte = 5; activeValue = b2; }
+    else if(b1){ activeLedByte = 6; activeValue = b1; }
+    else { activeLedByte = 7; activeValue = b0; }
+  } else if(step < 48){
+    // GPIO bank 1 -> LED3
+    activeLedByte = 3; activeValue = desiredGpioLed1;
+  } else {
+    // GPIO bank 2 -> LED4
+    activeLedByte = 4; activeValue = desiredGpioLed2;
+  }
+
+  char topStr[5]; // "LEDx"
+  snprintf(topStr, sizeof(topStr), "LED%d", activeLedByte);
+  // Center HEX value in 6-digit UTC: "  XX  "
+  char midStr6[7];
+  char hex2[3];
+  snprintf(hex2, sizeof(hex2), "%02X", activeValue);
+  snprintf(midStr6, sizeof(midStr6), "  %s  ", hex2);
+
+  chronoRowCHR = String(topStr);
+  chronoRowUTC = String(midStr6);
+  chronoRowET  = "tE5t"; // 7-seg friendly for tESt (S ~ digit 5)
+  renderChronoDisplays();
 }
 
 void startDiagSequence(){
@@ -362,8 +413,6 @@ void runDiagSequence(){
     diagSegmentSweep(elapsed - 10000);
   } else if(elapsed < 23000){
     diagLedWalkStep(elapsed - 12000);
-    // Keep displays indicating LED test
-    chronoRowCHR = "LED"; chronoRowUTC = "WALK  "; chronoRowET = "LED"; renderChronoDisplays();
   } else {
     diagSegmentTest(false);
     stopDiagSequence();
