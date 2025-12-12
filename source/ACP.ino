@@ -34,6 +34,29 @@ uint8_t hwAnLevel      = 0;
 // --- Runtime buffers / flags ---
 String serialAccum = "";
 
+// ============================================================================
+// UNIVERSAL PARAMETERS (same across all firmware versions)
+// ============================================================================
+// These parameters should be synchronized via Python at connect time
+// Commands: BL:xxx (backlight), AN:xxx (annunciator), DISP_BL:xx (display)
+// Smoothing: SMO_THR (threshold), SMO_SAM (samples), SMO_DLY (delay)
+
+// --- Smoothing Parameters (configurable via serial) ---
+// SMO_THR: Minimum change threshold for analog inputs (MUX/poti)
+// SMO_SAM: Number of samples for moving average (1-8)
+// SMO_DLY: Delay in microseconds after analog select (50-1000)
+int SMO_THRESHOLD = 10;           // Minimum change to trigger send (default: 10)
+int SMO_SAMPLES = 4;              // Moving average window size (default: 4)
+int SMO_DELAY_US = 300;           // Delay after MUX/analog select (microseconds, default: 300)
+
+// --- Brightness Parameters (configurable via serial) ---
+// BL:xxx    Backlight brightness (0-255, PWM)
+// AN:xxx    Annunciator brightness (0-255, PWM) - optional per panel
+// DISP_BL:xx Display brightness (0-15, MAX7219) - optional per panel
+int BL_LEVEL = 0;                 // Backlight current level
+int AN_LEVEL = 0;                 // Annunciator current level (if applicable)
+int DISP_BL_LEVEL = 15;           // Display brightness current level (if applicable)
+
 // --- Timing / throttles / debounce ---
 unsigned long lastLoopTs      = 0;
 const unsigned long LOOP_INTERVAL_MS      = 10;
@@ -41,10 +64,10 @@ unsigned long lastSendTs      = 0;
 const unsigned long SEND_MIN_INTERVAL_MS = 10;
 unsigned long lastDebounceTs  = 0;
 const unsigned long DEBOUNCE_MS = 12;
-
-// --- State caches ---
 int muxVals[16];
 int lastMuxVals[16];
+int muxBuffer[16][8];           // Ring buffer for smoothing (max 8 samples)
+int muxBufferIdx[16];           // Index into ring buffer per channel
 uint8_t inputState1 = 0xFF;
 uint8_t inputState2 = 0xFF;
 uint8_t lastInputState1 = 0xFF;
@@ -95,6 +118,10 @@ void applyLEDOutputs() {
   hwLedAnnun     = desiredLedAnnun;
   hwBlLevel      = desiredBlLevel;
   hwAnLevel      = desiredAnLevel;
+  
+  // Update universal brightness cache
+  BL_LEVEL = desiredBlLevel;
+  AN_LEVEL = desiredAnLevel;
 }
 
 void setLEDState(uint8_t backBits, uint8_t annBits, uint8_t bl, uint8_t an, bool allowDuringCombo = false) {
@@ -109,8 +136,22 @@ void setLEDState(uint8_t backBits, uint8_t annBits, uint8_t bl, uint8_t an, bool
 // --- MUX read helpers ---
 int readMuxChannelRaw(int idx) {
   for (int b = 0; b < 4; ++b) digitalWrite(muxSelectPins[b], (idx >> b) & 1);
-  delayMicroseconds(300);
+  delayMicroseconds(SMO_DELAY_US);
   return constrain(analogRead(muxOutputPin), 0, 1023);
+}
+
+// --- MUX Smoothing (moving average) ---
+int getMuxSmoothed(int channel, int rawValue) {
+  // Add raw value to ring buffer
+  muxBuffer[channel][muxBufferIdx[channel]] = rawValue;
+  muxBufferIdx[channel] = (muxBufferIdx[channel] + 1) % SMO_SAMPLES;
+  
+  // Calculate average of all samples in buffer
+  int sum = 0;
+  for (int i = 0; i < SMO_SAMPLES; i++) {
+    sum += muxBuffer[channel][i];
+  }
+  return sum / SMO_SAMPLES;
 }
 
 // --- Shift Register read (HC165) with Off-by-One Fix ---
@@ -147,13 +188,7 @@ void sendIdentAndState() {
   Serial.println();
 }
 
-void maybeSendIdentStartup() {
-  if (!identSentOnStart) {
-    delay(150);
-    sendIdentAndState();
-    identSentOnStart = true;
-  }
-}
+
 
 // --- Serial command parsing ---
 void processIncomingLine(const String &line) {
@@ -179,8 +214,12 @@ void processIncomingLine(const String &line) {
 
     if (key.equalsIgnoreCase("LED1")) setLEDState(parseBin8(val), desiredLedAnnun, desiredBlLevel, desiredAnLevel);
     else if (key.equalsIgnoreCase("LED2")) setLEDState(desiredLedBacklight, parseBin8(val), desiredBlLevel, desiredAnLevel);
-    else if (key.equalsIgnoreCase("BL")) setLEDState(desiredLedBacklight, desiredLedAnnun, constrain(val.toInt(),0,255), desiredAnLevel);
-    else if (key.equalsIgnoreCase("AN")) setLEDState(desiredLedBacklight, desiredLedAnnun, desiredBlLevel, constrain(val.toInt(),0,255));
+    else if (key.equalsIgnoreCase("BL")) { BL_LEVEL = constrain(val.toInt(),0,255); setLEDState(desiredLedBacklight, desiredLedAnnun, BL_LEVEL, desiredAnLevel); }
+    else if (key.equalsIgnoreCase("AN")) { AN_LEVEL = constrain(val.toInt(),0,255); setLEDState(desiredLedBacklight, desiredLedAnnun, desiredBlLevel, AN_LEVEL); }
+    else if (key.equalsIgnoreCase("DISP_BL")) { DISP_BL_LEVEL = constrain(val.toInt(),0,15); }
+    else if (key.equalsIgnoreCase("SMO_THR")) { SMO_THRESHOLD = constrain(val.toInt(), 1, 100); }
+    else if (key.equalsIgnoreCase("SMO_SAM")) { SMO_SAMPLES = constrain(val.toInt(), 1, 8); }
+    else if (key.equalsIgnoreCase("SMO_DLY")) { SMO_DELAY_US = constrain(val.toInt(), 50, 1000); }
     else if (key.equalsIgnoreCase("REQ")) forceSendNext = true;
     else if (key.equalsIgnoreCase("VER")) sendIdentAndState();
   }
@@ -210,8 +249,7 @@ void processSerialTokensFromHost() {
         continue;
       }
       if (tokenUp == "REQ") {
-        // immediate one-shot status reply for host request
-        sendStatusImmediate();
+        sendStatus();
         continue;
       }
       if (token.indexOf(':') >= 0) {
@@ -234,7 +272,7 @@ void sendStatus() {
   lastSendTs = now; forceSendNext = false;
 }
 
-void sendStatusImmediate() { sendStatus(); }
+
 
 // --- Setup ---
 void setup() {
@@ -245,14 +283,17 @@ void setup() {
   pinMode(ledLatchPin, OUTPUT); pinMode(ledClockPin, OUTPUT); pinMode(ledDataPin, OUTPUT);
   pinMode(backlightPWM, OUTPUT); pinMode(annunPWM, OUTPUT);
   analogWrite(backlightPWM,0); analogWrite(annunPWM,0);
-  for(int i=0;i<16;i++){muxVals[i]=0; lastMuxVals[i]=-9999;}
+  for(int i=0;i<16;i++){muxVals[i]=0; lastMuxVals[i]=-9999; muxBufferIdx[i]=0;}
   lastInputState1=0xFF; lastInputState2=0xFF;
   // Startup LED blink
   setLEDState(0xAA,0xAA,200,200,true); delay(150);
   setLEDState(0x55,0x55,200,200,true); delay(150);
   setLEDState(0xFF,0xFF,0,0,true); delay(150);
   setLEDState(0x00,0x00,0,0,true);
-  forceSendNext=true; maybeSendIdentStartup();
+  delay(150);
+  sendIdentAndState();
+  identSentOnStart = true;
+  forceSendNext = true;
 }
 
 // --- Main Loop ---
@@ -263,7 +304,10 @@ void loop() {
   if(now - lastLoopTs < LOOP_INTERVAL_MS) return; lastLoopTs=now;
 
   // --- Read MUX ---
-  for(int i=0;i<16;i++) muxVals[i]=readMuxChannelRaw(i);
+  for(int i=0;i<16;i++){
+    int rawVal = readMuxChannelRaw(i);
+    muxVals[i] = getMuxSmoothed(i, rawVal);
+  }
 
   // --- Read ShiftRegisters (HC165) ---
   readShiftRegisters(inputState1,inputState2);
@@ -274,13 +318,13 @@ void loop() {
       lastDebounceTs = now;
       lastInputState1 = inputState1;
       lastInputState2 = inputState2;
-      sendStatusImmediate();
+      sendStatus();
     }
   }
 
-  // --- MUX changes ---
+  // --- MUX changes (using SMO_THRESHOLD parameter) ---
   bool muxChanged = false;
-  for(int i=0;i<16;i++){if(abs(muxVals[i]-lastMuxVals[i])>4){muxChanged=true;lastMuxVals[i]=muxVals[i];}}
+  for(int i=0;i<16;i++){if(abs(muxVals[i]-lastMuxVals[i])>=SMO_THRESHOLD){muxChanged=true;lastMuxVals[i]=muxVals[i];}}
   if(muxChanged) sendStatus();
 
   // --- DIAG Combo ---

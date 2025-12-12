@@ -1,6 +1,6 @@
 /*
   ============================================================================
-  TILLER 1 CPT Firmware v2.1 - Refactored with Enhanced Smoothing
+  TILLER 1 CPT Firmware v1.1 - Protocol Standardization
   
   Pinout:
     Latch   -> Pin 2   (shift register latch)
@@ -10,9 +10,9 @@
     Button  -> Pin 4   (physical button - active LOW)
     Hall    -> A7      (Hall sensor input - analog)
   
-  Protocol: Matches RMP format for consistency
+  Protocol: Standardized format with semicolon terminators
     Commands: IDENT, VER, RESET, REQ, BR<val>, LED1:<byte>, SMO<val>, DBD<val>
-    Output:   IN1:<shift_bits>, A7:<adc_value>, LED1:<shift_bits>, BR:<value>
+    Output:   IN1:<shift_bits>;  A7:<adc_value>;  LED1:<shift_bits>;  BR:<value>;
   
   Hall Sensor Smoothing:
     Default: 60-sample moving average + 5-count deadband
@@ -24,8 +24,8 @@
 #include <avr/wdt.h>   // for RESET via Watchdog
 
 // Panel identification (must match INI file section name)
-const char PANEL_IDENT[] = "TILLER 1 CPT, v2.1 MAQ";
-const char PANEL_VERSION[] = "2.1";
+const char PANEL_IDENT[] = "TILLER 1 CPT, v1.1 MAQ";
+const char PANEL_VERSION[] = "1.1";
 
 // === Pin Definitions ===
 const int PIN_LATCH = 2;      // Shift register latch
@@ -87,12 +87,13 @@ void updateShiftRegister() {
 }
 
 /**
- * Format and send status response
+ * Format and send status response with semicolon terminator
  */
 void sendStatus(const char* label, const char* value) {
   Serial.print(label);
   Serial.print(":");
-  Serial.println(value);
+  Serial.print(value);
+  Serial.println(";");
 }
 
 /**
@@ -168,7 +169,7 @@ void setup() {
   lastBright = brightness;
   
   // Signal ready
-  Serial.println("READY");
+  Serial.println("READY;");
 }
 
 // ============================================================================
@@ -180,10 +181,10 @@ void loop() {
   int buttonRead = digitalRead(PIN_BUTTON);
   if (buttonRead != lastButton) {
     lastButton = buttonRead;
-    // Format: IN1:00000001 (button state in LSB, bit 0)
+    // Format: IN1:00000001; (button state in LSB, bit 0)
     // Button pressed (LOW) = bit set to 1
     char buf[16];
-    sprintf(buf, "IN1:%08b", buttonRead == LOW ? 0x01 : 0x00);
+    sprintf(buf, "IN1:%08b;", buttonRead == LOW ? 0x01 : 0x00);
     Serial.println(buf);
   }
   
@@ -192,7 +193,7 @@ void loop() {
   if (hallVal >= 0 && hallVal != lastHall) {  // Only send if readHallSmoothed() returned valid value
     lastHall = hallVal;
     char buf[16];
-    sprintf(buf, "A7:%04d", hallVal);
+    sprintf(buf, "A7:%04d;", hallVal);
     Serial.println(buf);
   }
   
@@ -208,16 +209,18 @@ void loop() {
     // ===== Command: IDENT =====
     if (cmd.equalsIgnoreCase("IDENT")) {
       Serial.print("IDENT:");
-      Serial.println(PANEL_IDENT);
+      Serial.print(PANEL_IDENT);
+      Serial.println(";");
     }
     // ===== Command: VER =====
     else if (cmd.equalsIgnoreCase("VER")) {
       Serial.print("VER:");
-      Serial.println(PANEL_VERSION);
+      Serial.print(PANEL_VERSION);
+      Serial.println(";");
     }
     // ===== Command: RESET =====
     else if (cmd.equalsIgnoreCase("RESET")) {
-      Serial.println("RESETTING");
+      Serial.println("RESETTING;");
       delay(50);
       wdt_enable(WDTO_15MS);  // 15ms watchdog timer
       while (1) {}  // Wait for reset
@@ -226,11 +229,11 @@ void loop() {
     else if (cmd.equalsIgnoreCase("REQ")) {
       // Send current status for all outputs
       char bufLED[16];
-      sprintf(bufLED, "LED1:%08b", ledState);
+      sprintf(bufLED, "LED1:%08b;", ledState);
       Serial.println(bufLED);
       
       char bufBR[16];
-      sprintf(bufBR, "BR:%d", brightness);
+      sprintf(bufBR, "BR:%d;", brightness);
       Serial.println(bufBR);
     }
     // ===== Command: BR<val> (Brightness) =====
@@ -245,7 +248,7 @@ void loop() {
         lastBright = brightness;
         
         char buf[16];
-        sprintf(buf, "BR:%d", brightness);
+        sprintf(buf, "BR:%d;", brightness);
         Serial.println(buf);
       }
     }
@@ -273,7 +276,7 @@ void loop() {
         lastLedState = ledState;
         
         char buf[16];
-        sprintf(buf, "LED1:%08b", ledState);
+        sprintf(buf, "LED1:%08b;", ledState);
         Serial.println(buf);
       }
     }
@@ -299,7 +302,7 @@ void loop() {
       }
       
       char buf[32];
-      sprintf(buf, "SMO:%d", HALL_SMOOTH_SAMPLES);
+      sprintf(buf, "SMO:%d;", HALL_SMOOTH_SAMPLES);
       Serial.println(buf);
     }
     // ===== Command: DBD<val> (Hall Deadband Threshold) =====
@@ -312,7 +315,7 @@ void loop() {
       hallDeadband = val;
       
       char buf[32];
-      sprintf(buf, "DBD:%d", hallDeadband);
+      sprintf(buf, "DBD:%d;", hallDeadband);
       Serial.println(buf);
     }
   }
@@ -353,7 +356,7 @@ void runPowerOnTest() {
   updateShiftRegister();
   applyBrightness(0);
   
-  Serial.println("POST:OK");
+  Serial.println("POST:OK;");
 }
 
 // ============================================================================
@@ -383,7 +386,7 @@ void diagStart() {
   applyBrightness(diagBright);
   diagTimer = millis();
   
-  Serial.println("DIAG:START");
+  Serial.println("DIAG:START;");
 }
 
 void diagLoop() {
@@ -403,7 +406,7 @@ void diagLoop() {
           // Transition to hold phase
           diagPhase = 1;
           diagTimer = now;
-          Serial.println("DIAG:FADE_UP_DONE");
+          Serial.println("DIAG:FADE_UP_DONE;");
         }
       }
       break;
@@ -414,7 +417,7 @@ void diagLoop() {
       if (now - diagTimer >= 3000) {
         diagPhase = 2;
         diagTimer = now;
-        Serial.println("DIAG:HOLDING");
+        Serial.println("DIAG:HOLDING;");
       }
       break;
     }
@@ -430,7 +433,7 @@ void diagLoop() {
           // End diagnostic mode
           diagPhase = 3;
           diagTimer = now;
-          Serial.println("DIAG:FADE_DOWN_DONE");
+          Serial.println("DIAG:FADE_DOWN_DONE;");
         }
       }
       break;
@@ -444,7 +447,7 @@ void diagLoop() {
       applyBrightness(0);
       
       diagActive = false;
-      Serial.println("DIAG:COMPLETE");
+      Serial.println("DIAG:COMPLETE;");
       break;
     }
   }
