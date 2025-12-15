@@ -650,6 +650,13 @@ void readShiftRegisters(uint8_t &in1, uint8_t &in2) {
   byte raw2 = shiftIn(inputDataPin, inputClockPin, MSBFIRST);
   in1 = ~raw1;  // Invert if buttons are active-low
   in2 = ~raw2;
+
+  // NOTE: ON/OFF switch (IN2 bit 5) wiring is inverted on PCB revision -
+  // Historically ON produced 1, OFF 0. New board wiring requires reporting
+  // the inverse: when physical ON switch is set we must report 0 and vice versa.
+  // Compensate here by flipping bit 5.
+  const uint8_t ONOFF_BIT = (1 << 5);
+  in2 ^= ONOFF_BIT; // invert ON/OFF logical value
   
   // Timing stabilization (like ACP)
   digitalWrite(inputLatchPin, LOW);
