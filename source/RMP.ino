@@ -41,7 +41,7 @@ const int pwmBrightness = 3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RMP1 CPT, v1.0 MAQ";
+const char* PANEL_IDENT = "RMP, v1.0 MAQ";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
 

@@ -1,4 +1,10 @@
 // MIP Control Script, (w) 2025 M. Quatember / BigMaQ
+
+// Setze diese Zeile auf 1, um Bootsequenz und alle Startup-Ausgaben IMMER zu unterdrücken
+#define SUPPRESS_BOOTSEQ 0
+
+// Panel-Identifikation beim Start anzeigen (Sekunden)
+#define IDENT_DISPLAY_MS 2000
 // Protocol-compatible with RMP/ACP: VER, IDENT, RESET, REQ, LEDx, INx, BL/AN/DISP_BL
 // Chrono: 2x MAX7219 in series, driving 3 logical rows (CHR/UTC/ET) via time-multiplex
 // BRK Panel: 2 LED drivers in series; Backlight drivers: 3 in series
@@ -6,6 +12,7 @@
 #include <LedControl.h>
 #include <EEPROM.h>
 #include <avr/wdt.h>
+#include <avr/io.h>
 
 // ============================================================================
 // PIN DEFINITIONS (placeholders from schematic; adjust as needed)
@@ -62,9 +69,8 @@ const int analogPins[] = {A0,A1,A2,A3,A4,A5,A6};
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "MIP A320, v1.0 MAQ";
+const char* PANEL_IDENT = "MIP, v1.0 MAQ";
 bool identSentOnStart = false;
-unsigned long pauseUntil = 0;
 
 // ============================================================================
 // STATE: LED drivers and brightness
@@ -132,18 +138,25 @@ const unsigned long SEND_MIN_INTERVAL_MS = 10;
 bool forceSendNext = false;
 bool analogReportEnabled = false;  // Gate analog reporting (enable via ANALOG_EN:1)
 
-// Boot sequence
-enum BootState { BOOT_INIT, BOOT_RUNNING };
-BootState bootState = BOOT_INIT;
-unsigned long bootSequenceStart = 0;
+// IDENT delay for scan clarity (non-blocking)
+bool identDelayActive = false;
+unsigned long identDelayStart = 0;
+const unsigned long IDENT_DELAY_MS = 200;
 
 // Clock mode
 bool clockEnabled = false;
 unsigned long lastClockUpdate = 0;
 const unsigned long CLOCK_UPDATE_MS = 1000;
 unsigned long clockSeconds = 0;
-bool bootDone = false; // guard boot sequence from running twice
 bool ackEnabled = false; // gate serial ACK echo for commands
+// When true, `initDisplays()` will avoid printing its debug message (used on EXTRF skips)
+// By default suppress noisy init prints on (re)connect; IDENT/STATUS still
+// sent when requested by host via VER/REQ.
+bool suppress_init_debug = true;
+
+// Chrono state (seconds mode: MM:SS)
+bool chronoRunning = false;
+unsigned long chronoSeconds = 0;
 
 // ============================================================================
 // HELPERS
@@ -220,9 +233,6 @@ void initDisplays(){
   
   // Explicitly set all 8 rows to 0
   for(int d=0; d<8; d++) lc.setRow(1, d, 0x00);
-  
-  Serial.print("DEBUG:Displays initialized, brightness=");
-  Serial.println(DISP_BL_LEVEL);
 }
 
 byte charTo7Seg(char c){
@@ -234,16 +244,17 @@ byte charTo7Seg(char c){
     case '9': return 0b01111011; case 'A': return 0b01110111; case 'B': return 0b00011111;
     case 'C': return 0b01001110; case 'D': return 0b00111101; case 'E': return 0b01001111;
     case 'F': return 0b01000111; case 'H': return 0b00110111; case 'U': return 0b00111110;
-    case 'S': return 0b01011011; // S approximated by digit 5
-    case 'L': return 0b00001110; // L
-    case 'I': return 0b00110000; // I approximated by 1
-    case 'G': return 0b01011110; // G like '6' without middle (lower-right on, upper-right off)
-    case 'O': return 0b01111110; // O like 0 without middle
-    case 'P': return 0b01100111; // P
-    case 'Y': return 0b00111001; // Y
-    case 'N': return 0b00110111; // N approximated (similar to H)
-    case 'M': return 0b00110111; // M approximated (reuse H pattern)
-    case 'T': return 0b00001111; case 'R': return 0b00000101; case '-': return 0b00000001;
+    case 'S': return 0b01011011;  
+    case 'L': return 0b00001110; 
+    case 'J': return 0b00111000; 
+    case 'I': return 0b00110000; 
+    case 'G': return 0b01011110; 
+    case 'O': return 0b01111110; 
+    case 'P': return 0b01100111;
+    case 'Y': return 0b00111011;
+    case 'N': return 0b00010101; 
+    case 'M': return 0b00110111; 
+    case 'T': return 0b00001111; case 'R': return 0b00000101; case '-': return 0b00000001; case '$': return 0b00000100;
     case ' ': return 0b00000000; default: return 0b00000000;
   }
 }
@@ -322,17 +333,15 @@ void diagLedWalkStep(unsigned long elapsed){
   desiredGpioLed1 = 0;
   desiredGpioLed2 = 0;
 
-  if(step < 16){
-    desiredBrkLed = (1 << (15 - step)); // walk MSB->LSB for clarity
-  } else if(step < 40){
-    int idx = step - 16; // 0..23
-    desiredBlLed = (uint32_t(1) << (23 - idx));
-  } else if(step < 48){
-    int idx = step - 40; // 0..7
-    desiredGpioLed1 = (1 << (7 - idx));
+  if(step < 8){
+    desiredGpioLed1 = (1 << (7 - step));
+  } else if(step < 16){
+    desiredGpioLed2 = (1 << (15 - step));
+  } else if(step < 32){
+    desiredBrkLed = (1 << (31 - step)); // walk MSB->LSB for clarity
   } else {
-    int idx = step - 48; // 0..7
-    desiredGpioLed2 = (1 << (7 - idx));
+    int idx = step - 32; // 0..23
+    desiredBlLed = (uint32_t(1) << (23 - idx));
   }
   applyOutputs();
 
@@ -343,13 +352,19 @@ void diagLedWalkStep(unsigned long elapsed){
   int activeLedByte = 0; // 1..7
   uint8_t activeValue = 0x00;
 
-  if(step < 16){
-    // BRK 16-bit -> LED1 (high), LED2 (low)
+  if(step < 8){
+    // GPIO bank 1 -> LED1
+    activeLedByte = 1; activeValue = desiredGpioLed1;
+  } else if(step < 16){
+    // GPIO bank 2 -> LED2
+    activeLedByte = 2; activeValue = desiredGpioLed2;
+  } else if(step < 32){
+    // BRK 16-bit -> LED3 (high), LED4 (low)
     uint8_t hi = (desiredBrkLed >> 8) & 0xFF;
     uint8_t lo = desiredBrkLed & 0xFF;
-    if(hi) { activeLedByte = 1; activeValue = hi; }
-    else   { activeLedByte = 2; activeValue = lo; }
-  } else if(step < 40){
+    if(hi) { activeLedByte = 3; activeValue = hi; }
+    else   { activeLedByte = 4; activeValue = lo; }
+  } else {
     // Backlight 24-bit -> LED5 (MSB), LED6, LED7 (LSB)
     uint8_t b2 = (desiredBlLed >> 16) & 0xFF; // LED5
     uint8_t b1 = (desiredBlLed >> 8)  & 0xFF; // LED6
@@ -357,12 +372,6 @@ void diagLedWalkStep(unsigned long elapsed){
     if(b2){ activeLedByte = 5; activeValue = b2; }
     else if(b1){ activeLedByte = 6; activeValue = b1; }
     else { activeLedByte = 7; activeValue = b0; }
-  } else if(step < 48){
-    // GPIO bank 1 -> LED3
-    activeLedByte = 3; activeValue = desiredGpioLed1;
-  } else {
-    // GPIO bank 2 -> LED4
-    activeLedByte = 4; activeValue = desiredGpioLed2;
   }
 
   char topStr[5]; // "LEDx"
@@ -384,6 +393,9 @@ void startDiagSequence(){
   diagStartTs = millis();
   Serial.println("DIAG:START");
 }
+
+// Manuelle Bootsequenz (wie bisher, aber nur auf Kommando)
+void runManualBootSequence();
 
 void stopDiagSequence(){
   diagRunning = false;
@@ -452,14 +464,11 @@ void renderChronoDisplays(){
   // Device 0: UTC (6 digits)
   // Device 1: CHR (4 digits) on the right half (digits 0-3)
   //           ET (4 digits) on the left half (digits 4-7)
-  
-  // Render UTC on device 0, digits 0-5
-  // First 4 digits (HHMM style) use colon-mode, last 2 digits use normal DP handling
-  String utcFirst = chronoRowUTC.substring(0, indexAfterDigits(chronoRowUTC, 4));
-  String utcTail  = chronoRowUTC.substring(indexAfterDigits(chronoRowUTC, 4));
+  // Manuelle Bootsequenz ist im globalen Scope implementiert
+
+  // Render UTC on device 0, digits 0-5 as full HH.MM.SS (DPs from '.' in text) 
   byte utcBuf[6];
-  buildDigitBuffer(utcFirst, utcBuf, 4, true, 2);
-  buildDigitBuffer(utcTail, utcBuf+4, 2, false, 0);
+  buildDigitBuffer(chronoRowUTC, utcBuf, 6, false, 0);
   for(int i=0; i<6; i++) lc.setRow(0, 5-i, utcBuf[i]); // digit 5=leftmost, 0=rightmost
   
   // Render CHR on device 1, digits 0-3
@@ -470,6 +479,8 @@ void renderChronoDisplays(){
   byte etBuf[4]; buildDigitBuffer(chronoRowET, etBuf, 4, true, 2);
   for(int i=0; i<4; i++) lc.setRow(1, 7-i, etBuf[i]); // digit 7=leftmost of ET, 4=rightmost
 }
+
+// --- Ende Patch ---
 
 // ============================================================================
 // INPUTS
@@ -507,11 +518,19 @@ void updateClock() {
     unsigned long hours = (clockSeconds / 3600) % 24;
     unsigned long mins = (clockSeconds / 60) % 60;
     unsigned long secs = clockSeconds % 60;
-    
-    // Format as HH:MM:SS but without colons (6 digits)
-    char timeStr[7];
-    sprintf(timeStr, "%02lu%02lu%02lu", hours, mins, secs);
-    chronoRowUTC = String(timeStr);
+    // Render UTC as HH.MM.SS using DP as colon
+    char utcStr[9];
+    sprintf(utcStr, "%02lu.%02lu.%02lu", hours, mins, secs);
+    chronoRowUTC = String(utcStr);
+    // Update chrono in seconds mode (MM.SS) if running
+    if (chronoRunning) {
+      unsigned long cmins = (chronoSeconds / 60) % 100; // roll over at 99:59
+      unsigned long csecs = chronoSeconds % 60;
+      char chrStr[6];
+      sprintf(chrStr, "%02lu.%02lu", cmins, csecs);
+      chronoRowCHR = String(chrStr);
+      chronoSeconds++;
+    }
     renderChronoDisplays();
   }
 }
@@ -571,21 +590,25 @@ void sendStatus(){
 
 void processIncomingLine(const String &line){
   int start=0; while(true){ int sep=line.indexOf(';', start); if(sep<0) break; String token=line.substring(start,sep); start=sep+1; token.trim(); if(token.length()==0) continue;
-    if(token.indexOf(':')<0){ if(token.equalsIgnoreCase("VER")||token.equalsIgnoreCase("VERSION")){ sendIdentAndState(); continue;} if(token.equalsIgnoreCase("REQ")){ forceSendNext=true; continue;} if(token.equalsIgnoreCase("RESET")){ Serial.println("RESET:OK ;"); Serial.flush(); delay(50); wdt_enable(WDTO_15MS); while(true){} }
-      continue; }
+    if(token.indexOf(':')<0){
+      if(token.equalsIgnoreCase("VER")||token.equalsIgnoreCase("VERSION")){ sendIdentAndState(); identDelayActive = true; identDelayStart = millis(); continue;}
+      if(token.equalsIgnoreCase("REQ")){ forceSendNext=true; continue;}
+      if(token.equalsIgnoreCase("RESET")){ Serial.println("RESET:OK ;"); Serial.flush(); delay(50); wdt_enable(WDTO_15MS); while(true){} }
+      continue;
+    }
     int colon=token.indexOf(':'); if(colon<0) continue; String key=token.substring(0,colon); String val=token.substring(colon+1); key.trim(); val.trim();
-    if(key.equalsIgnoreCase("LED1")){ // BRK driver high byte
-      uint8_t v=parseBin8(val); desiredBrkLed = (desiredBrkLed & 0x00FF) | (uint16_t(v)<<8); applyOutputs();
-      if(ackEnabled){ Serial.print("ACK:LED1:"); Serial.println(bin8(v)); }
-    } else if(key.equalsIgnoreCase("LED2")){ // BRK driver low byte
-      uint8_t v=parseBin8(val); desiredBrkLed = (desiredBrkLed & 0xFF00) | uint16_t(v); applyOutputs();
-      if(ackEnabled){ Serial.print("ACK:LED2:"); Serial.println(bin8(v)); }
-    } else if(key.equalsIgnoreCase("LED3")){ // Direct GPIO bank 1 (8 outputs)
+    if(key.equalsIgnoreCase("LED1")){ // Direct GPIO bank 1 (8 outputs)
       desiredGpioLed1 = parseBin8(val); applyOutputs();
-      if(ackEnabled){ Serial.print("ACK:LED3:"); Serial.println(bin8(desiredGpioLed1)); }
-    } else if(key.equalsIgnoreCase("LED4")){ // Direct GPIO bank 2 (8 outputs)
+      if(ackEnabled){ Serial.print("ACK:LED1:"); Serial.println(bin8(desiredGpioLed1)); }
+    } else if(key.equalsIgnoreCase("LED2")){ // Direct GPIO bank 2 (8 outputs)
       desiredGpioLed2 = parseBin8(val); applyOutputs();
-      if(ackEnabled){ Serial.print("ACK:LED4:"); Serial.println(bin8(desiredGpioLed2)); }
+      if(ackEnabled){ Serial.print("ACK:LED2:"); Serial.println(bin8(desiredGpioLed2)); }
+    } else if(key.equalsIgnoreCase("LED3")){ // BRK driver high byte
+      uint8_t v=parseBin8(val); desiredBrkLed = (desiredBrkLed & 0x00FF) | (uint16_t(v)<<8); applyOutputs();
+      if(ackEnabled){ Serial.print("ACK:LED3:"); Serial.println(bin8(v)); }
+    } else if(key.equalsIgnoreCase("LED4")){ // BRK driver low byte
+      uint8_t v=parseBin8(val); desiredBrkLed = (desiredBrkLed & 0xFF00) | uint16_t(v); applyOutputs();
+      if(ackEnabled){ Serial.print("ACK:LED4:"); Serial.println(bin8(v)); }
     } else if(key.equalsIgnoreCase("LED5")){ // Backlight chain byte 2 (MSB)
       uint8_t v=parseBin8(val); desiredBlLed = (desiredBlLed & 0x0000FFFF) | (uint32_t(v)<<16); applyOutputs();
       if(ackEnabled){ Serial.print("ACK:LED5:"); Serial.println(bin8(v)); }
@@ -659,12 +682,51 @@ void processIncomingLine(const String &line){
     } else if(key.equalsIgnoreCase("CLOCK")){
       clockEnabled = (val=="1" || val.equalsIgnoreCase("ON"));
       if(clockEnabled){
-        clockSeconds = 0; // Reset to 00:00:00
+        clockSeconds = 0; // Default to 00:00:00 unless set via CLOCK:SET
         lastClockUpdate = millis();
+        // Initialize CHR and ET
+        chronoRowCHR = "00.00"; // Chrono MM.SS when running
+        chronoRowET  = "00.00"; // Elapsed/ET placeholder
         Serial.println("CLOCK:ON");
+        renderChronoDisplays();
       } else {
         Serial.println("CLOCK:OFF");
       }
+    } else if(key.equalsIgnoreCase("CLOCK_SET") || key.equalsIgnoreCase("CLOCK:SET")){
+      // Accept HH:MM:SS or HH.MM.SS
+      String t = val;
+      t.replace(':', '.');
+      int p1 = t.indexOf('.');
+      int p2 = (p1>=0) ? t.indexOf('.', p1+1) : -1;
+      if(p1>0 && p2>p1){
+        int hh = t.substring(0, p1).toInt();
+        int mm = t.substring(p1+1, p2).toInt();
+        int ss = t.substring(p2+1).toInt();
+        hh = constrain(hh, 0, 23);
+        mm = constrain(mm, 0, 59);
+        ss = constrain(ss, 0, 59);
+        clockSeconds = (unsigned long)hh*3600UL + (unsigned long)mm*60UL + (unsigned long)ss;
+        // Immediately render updated time
+        char utcStr[9];
+        sprintf(utcStr, "%02d.%02d.%02d", hh, mm, ss);
+        chronoRowUTC = String(utcStr);
+        renderChronoDisplays();
+        Serial.println("CLOCK:SET:OK");
+      } else {
+        Serial.println("CLOCK:SET:ERR");
+      }
+    } else if(key.equalsIgnoreCase("CHR_START") || key.equalsIgnoreCase("CHR:START")){
+      chronoRunning = true;
+      Serial.println("CHR:START");
+    } else if(key.equalsIgnoreCase("CHR_STOP") || key.equalsIgnoreCase("CHR:STOP")){
+      chronoRunning = false;
+      Serial.println("CHR:STOP");
+    } else if(key.equalsIgnoreCase("CHR_RESET") || key.equalsIgnoreCase("CHR:RESET")){
+      chronoRunning = false;
+      chronoSeconds = 0;
+      chronoRowCHR = "00.00";
+      renderChronoDisplays();
+      Serial.println("CHR:RESET");
     } else if(key.equalsIgnoreCase("ANALOG_EN")){ analogReportEnabled = (val=="1" || val.equalsIgnoreCase("ON")); Serial.print("ANALOG_EN:"); Serial.println(analogReportEnabled?"ON":"OFF");
     } else if(key.equalsIgnoreCase("DEBUG_SR")){
       // Debug: read raw shift register values before inversion
@@ -702,10 +764,10 @@ void processIncomingLine(const String &line){
 
 void processSerialTokensFromHost(){
   while(Serial.available()){
-    char c=Serial.read(); if(c=='\r') continue; if(c=='\n') c=';'; serialAccum+=c;
+    char c=Serial.read(); if(c=='\r' || c=='\n') c=';'; serialAccum+=c;
     int idx; while((idx=serialAccum.indexOf(';'))>=0){ String token=serialAccum.substring(0,idx); token.trim(); serialAccum=serialAccum.substring(idx+1); if(token.length()==0) continue;
       String up=token; up.toUpperCase();
-      if(up=="VER"||up=="VERSION"){ sendIdentAndState(); identSentOnStart=true; pauseUntil=millis()+200; continue; }
+      if(up=="VER"||up=="VERSION"){ sendIdentAndState(); continue; }
       if(up=="REQ"){ sendStatus(); continue; }
       if(up=="RESET"){ Serial.println("RESET:OK ;"); Serial.flush(); delay(50); wdt_enable(WDTO_15MS); while(true){} }
       if(token.indexOf(':')>=0){ processIncomingLine(token+";"); continue; }
@@ -716,59 +778,7 @@ void processSerialTokensFromHost(){
 // ============================================================================
 // BOOT SEQUENCE
 // ============================================================================
-void runBootSequence() {
-  unsigned long elapsed = millis() - bootSequenceStart;
-  
-  // Stage 0: All segments lit test (0-500ms)
-  if (elapsed < 500) {
-    // Device 0: 6 digits (UTC), Device 1: 8 digits (CHR+ET)
-    for(int d=0; d<6; d++) lc.setRow(0, d, 0xFF);
-    for(int d=0; d<8; d++) lc.setRow(1, d, 0xFF);
-    return;
-  }
-  
-  // Stage 1: Clear all (500-700ms)
-  if (elapsed < 700) {
-    for(int d=0; d<6; d++) lc.setRow(0, d, 0x00);
-    for(int d=0; d<8; d++) lc.setRow(1, d, 0x00);
-    return;
-  }
-  
-  // Stage 2: Display count pattern (700-2500ms)
-  if (elapsed < 2500) {
-    int count = ((elapsed - 700) / 200) % 10;
-    String c4 = String(count) + String(count) + String(count) + String(count);
-    String c6 = c4 + String(count) + String(count);
-    chronoRowCHR = c4;    // 4 digits
-    chronoRowUTC = c6;    // 6 digits
-    chronoRowET = c4;     // 4 digits
-    renderChronoDisplays();
-    return;
-  }
-  
-  // Stage 3: Show panel identification (2500-4500ms)
-  if (elapsed < 4500) {
-    chronoRowCHR = "n$IP";     // 4 digits
-    chronoRowUTC = "A320  ";   // 6 digits
-    chronoRowET = "U1.0";      // 4 digits
-    renderChronoDisplays();
-    return;
-  }
-  
-  // Stage 4: Clear and transition to running (4500ms+)
-  chronoRowCHR = "    ";    // 4 spaces
-  chronoRowUTC = "      ";  // 6 spaces
-  chronoRowET = "    ";     // 4 spaces
-  renderChronoDisplays();
-  delay(200);
-  chronoRowCHR = "CHR ";
-  chronoRowUTC = "UTC   ";
-  chronoRowET = "ET  ";
-  renderChronoDisplays();
-  bootState = BOOT_RUNNING;
-  bootDone = true;
-  forceSendNext = true;
-}
+// Removed boot sequence
 
 // ============================================================================
 // SETUP
@@ -776,12 +786,10 @@ void runBootSequence() {
 void setup(){
   wdt_disable();
   Serial.begin(115200);
-  
-  // MAX7219 pins (must be OUTPUT for LedControl to work)
+  delay(10);
   pinMode(maxDataPin, OUTPUT);
   pinMode(maxClkPin, OUTPUT);
   pinMode(maxCsPin, OUTPUT);
-  
   pinMode(brkLatchPin, OUTPUT); pinMode(brkClkPin, OUTPUT); pinMode(brkDataPin, OUTPUT);
   pinMode(blLatchPin, OUTPUT); pinMode(blClkPin, OUTPUT); pinMode(blDataPin, OUTPUT);
   for(int i=0;i<8;i++) pinMode(ledGpioPins1[i], OUTPUT);
@@ -792,12 +800,11 @@ void setup(){
   for(unsigned i=0;i<sizeof(analogPins)/sizeof(analogPins[0]); i++) pinMode(analogPins[i], INPUT);
   initDisplays();
   setLEDState(0x0000, 0x000000, 0, 0, 0);
-  
-  // Start boot sequence
-  bootState = BOOT_INIT;
-  bootSequenceStart = millis();
-  
-  sendIdentAndState(); identSentOnStart=true; forceSendNext=true;
+  chronoRowCHR = "CHR ";
+  chronoRowUTC = "UTC   ";
+  chronoRowET  = "ET  ";
+  renderChronoDisplays();
+  sendIdentAndState();
 }
 
 // ============================================================================
@@ -806,19 +813,27 @@ void setup(){
 void loop(){
   unsigned long now=millis();
   
-  // Handle boot sequence
-  if (bootState == BOOT_INIT) {
-    runBootSequence();
-    return;
-  }
-
   // If DIAG sequence is running, drive it and skip normal processing
   if(diagRunning){
     runDiagSequence();
     return;
   }
   
-  if(now<pauseUntil) return; processSerialTokensFromHost(); if(now-lastLoopTs<LOOP_INTERVAL_MS) return; lastLoopTs=now;
+  // Always process incoming host commands
+  processSerialTokensFromHost();
+
+  // Check for IDENT delay (non-blocking pause for scan clarity)
+  if(identDelayActive){
+    if(millis() - identDelayStart >= IDENT_DELAY_MS){
+      identDelayActive = false;
+    } else {
+      // Skip main loop logic during delay, but serial processing continues above
+      return;
+    }
+  }
+
+  if(now-lastLoopTs<LOOP_INTERVAL_MS) return;
+  lastLoopTs=now;
   // Inputs
   readShift(inShift1, inShift2);
   for(int g=0; g<NUM_DIRECT_GROUPS; g++){
@@ -827,6 +842,29 @@ void loop(){
     if(pinsInGroup > 8) pinsInGroup = 8;
     inDirect[g] = readDirectGroup(directInPins + offset, pinsInGroup);
   }
+
+  // --- Chrono button logic (CHR: IN1 bit 3, RST: IN1 bit 4) only in CLOCK:ON mode ---
+  static bool lastChrBtn = false, lastRstBtn = false;
+  bool chrBtn = (inShift1 & 0b00001000); // IN1 bit 3
+  bool rstBtn = (inShift1 & 0b00010000); // IN1 bit 4
+
+  if(clockEnabled) {
+    // CHR: toggle start/stop on rising edge
+    if(chrBtn && !lastChrBtn) {
+      chronoRunning = !chronoRunning;
+      Serial.print("CHR:"); Serial.println(chronoRunning ? "START" : "STOP");
+    }
+    // RST: reset chrono on rising edge
+    if(rstBtn && !lastRstBtn) {
+      chronoRunning = false;
+      chronoSeconds = 0;
+      chronoRowCHR = "00.00";
+      renderChronoDisplays();
+      Serial.println("CHR:RESET");
+    }
+  }
+  lastChrBtn = chrBtn;
+  lastRstBtn = rstBtn;
 
   // DIAG combo: RST (IN1 bit4), CHR (IN1 bit3), DATE (IN6 bit4)
   bool hasIN6 = (NUM_DIRECT_GROUPS >= 4);
