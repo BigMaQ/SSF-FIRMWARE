@@ -9,6 +9,10 @@
 // Chrono: 2x MAX7219 in series, driving 3 logical rows (CHR/UTC/ET) via time-multiplex
 // BRK Panel: 2 LED drivers in series; Backlight drivers: 3 in series
 
+// 2026-06-06
+// Added LED8 bank for GS_FO on A7.
+// Because 16 LEDs were apparently not enough.
+
 #include <LedControl.h>
 #include <EEPROM.h>
 #include <avr/wdt.h>
@@ -33,13 +37,14 @@ const int brkDataPin  = 4;    // BRK_LEDDRV_DATA
 const int brkClkPin   = 3;    // BRK_LEDDRV_CLK
 
 // Backlight drivers (3x) share same Latch/Clk/Data (using separate chain)
-const int blLatchPin = 53;    // BLTDRV_LATCH
+const int blLatchPin = 51;    // BLTDRV_LATCH
 const int blClkPin   = 52;    // BLTDRV_CLK
-const int blDataPin  = 51;    // BLTDRV_DATA
+const int blDataPin  = 53;    // BLTDRV_DATA
 
 // Direct GPIO LED outputs (16 lines, two 8-bit banks, ordered by resistor pins)
 const int ledGpioPins1[8] = {5,7,12,16,17,20,21,24};
 const int ledGpioPins2[8] = {25,26,27,30,32,44,46,60}; // A6 as digital 60
+const int ledGpioPins3[8] = {61,-1,-1,-1,-1,-1,-1,-1}; // A7 as digital 61
 
 // Annunciator & Backlight PWM (hardware PWM pins)
 const int annuPWM = 11;       // ANNU_BRT
@@ -64,12 +69,12 @@ const int NUM_DIRECT_PINS = sizeof(directInPins) / sizeof(directInPins[0]);
 const int NUM_DIRECT_GROUPS = (NUM_DIRECT_PINS + 7) / 8; // pack into IN3+ groups
 
 // Analog inputs (Ax): forward raw via serial (do NOT include pins used for MAX/shift regs)
-const int analogPins[] = {A0,A1,A2,A3,A4,A5,A6};
+const int analogPins[] = {A0,A1,A2,A3,A4,A5};
 
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "MIP, v1.0 MAQ";
+const char* PANEL_IDENT = "MIP, v1.1 MAQ";
 bool identSentOnStart = false;
 
 // ============================================================================
@@ -85,6 +90,7 @@ uint32_t hwBlLed = 0x000000;
 
 uint8_t desiredGpioLed1 = 0x00; // direct GPIO bank 1
 uint8_t desiredGpioLed2 = 0x00; // direct GPIO bank 2
+uint8_t desiredGpioLed3 = 0x00; // direct GPIO bank 3
 uint8_t hwGpioLed1 = 0x00;
 uint8_t hwGpioLed2 = 0x00;
 
@@ -126,6 +132,8 @@ bool diagComboLatched = false;
 // DIAG sequence runtime
 bool diagRunning = false;
 unsigned long diagStartTs = 0;
+// Analog input state
+int lastSentAnalog[6] = {0};
 
 // ============================================================================
 // RUNTIME
@@ -137,6 +145,7 @@ unsigned long lastSendTs = 0;
 const unsigned long SEND_MIN_INTERVAL_MS = 10;
 bool forceSendNext = false;
 bool analogReportEnabled = false;  // Gate analog reporting (enable via ANALOG_EN:1)
+int analogDeadband = 8;
 
 // IDENT delay for scan clarity (non-blocking)
 bool identDelayActive = false;
@@ -186,6 +195,8 @@ void applyOutputs(){
   // Direct GPIO LED banks
   for(int i=0;i<8;i++) digitalWrite(ledGpioPins1[i], (desiredGpioLed1 & (1<<i)) ? HIGH : LOW);
   for(int i=0;i<8;i++) digitalWrite(ledGpioPins2[i], (desiredGpioLed2 & (1<<i)) ? HIGH : LOW);
+  for(int i=0;i<8;i++) digitalWrite(ledGpioPins3[i], (desiredGpioLed3 & (1<<i)) ? HIGH : LOW);
+
   // PWM brightness
   analogWrite(annuPWM, desiredAnLevel);
   analogWrite(backlightPWM, desiredBlLevel);
@@ -259,38 +270,86 @@ byte charTo7Seg(char c){
   }
 }
 
-void buildDigitBuffer(const String &src, byte *out, int maxDigits, bool colonMode=false, int colonIdx=2){
-  // Build digit patterns with optional colon-style DP placement
-  int digit=0; bool sawDot=false;
-  for(int i=0; i<src.length() && digit<maxDigits; i++){
-    char c = src.charAt(i);
-    if(c=='.'){
-      sawDot = true; // track dot for colon placement
-      if(!colonMode && digit>0) out[digit-1] |= 0b10000000; // normal DP on previous digit
-      continue;
+void buildDigitBuffer(const String &src, byte *out, int maxDigits,
+                      bool colonMode=false, int colonIdx=2)
+{
+    for(int i=0;i<maxDigits;i++)
+        out[i] = charTo7Seg('0');
+
+    int len = 0;
+
+    for(int i=0;i<src.length();i++)
+    {
+        char c = src.charAt(i);
+
+        if(c != '.')
+            len++;
     }
-    out[digit] = charTo7Seg(c);
-    digit++;
-  }
-  for(; digit<maxDigits; digit++) out[digit]=0x00;
-  if(colonMode && sawDot && colonIdx>=0 && colonIdx<maxDigits){
-    out[colonIdx] |= 0b10000000; // place colon/DP at fixed digit (e.g., HH:MM)
-  }
+
+    int startDigit = maxDigits - len;
+
+    if(startDigit < 0)
+        startDigit = 0;
+
+    int digit = startDigit;
+    bool sawDot = false;
+
+    for(int i=0; i<src.length() && digit<maxDigits; i++)
+    {
+        char c = src.charAt(i);
+
+        if(c=='.')
+        {
+            sawDot = true;
+
+            if(!colonMode && digit>startDigit)
+                out[digit-1] |= 0b10000000;
+
+            continue;
+        }
+
+        out[digit] = charTo7Seg(c);
+        digit++;
+    }
+
+    bool hasDigit = false;
+
+    for(int i=0; i<src.length(); i++)
+    {
+        if(isDigit(src.charAt(i)))
+        {
+            hasDigit = true;
+            break;
+        }
+    }
+
+    if(colonMode && hasDigit &&
+      colonIdx>=0 && colonIdx<maxDigits)
+    {
+        out[colonIdx] |= 0b10000000;
+    }
 }
 
-String trimToDigits(const String &src, int maxDigits){
-  // Keep characters until maxDigits (dots don't count toward digit budget)
-  String out=""; int digits=0;
-  for(int i=0; i<src.length(); i++){
-    char c=src.charAt(i);
-    if(c=='.'){
-      if(digits>0) out+=c; // allow DP for previous digit
-      continue;
+String trimToDigits(const String &src, int maxDigits)
+{
+    String out="";
+    int digits=0;
+
+    for(int i=0;i<src.length();i++)
+    {
+        char c=src.charAt(i);
+
+        if(c=='.')
+            break;      // <- statt weiterlaufen
+
+        if(digits>=maxDigits)
+            break;
+
+        out+=c;
+        digits++;
     }
-    if(digits>=maxDigits) break;
-    out+=c; digits++;
-  }
-  return out;
+
+    return out;
 }
 
 // ============================================================================
@@ -551,6 +610,8 @@ void sendDiagReport(){
   Serial.print(";BRT_AN:"); Serial.print(hwAnLevel);
   Serial.print(";BRT_BL:"); Serial.print(hwBlLevel);
   Serial.print(";BRT_DISP:"); Serial.print(hwDispLevel);
+  Serial.print(";ANALOG_DB:");
+  Serial.print(analogDeadband);
   Serial.print(";INTENSITY:"); Serial.print(DISP_BL_LEVEL);
   Serial.print(";CLOCK:"); Serial.print(clockEnabled?"ON":"OFF");
   Serial.print(";CLK_SEC:"); Serial.print(clockSeconds);
@@ -561,15 +622,27 @@ void sendDiagReport(){
 }
 
 void sendSetupMenu(){
-  Serial.println("SETUP:MENU;ITEMS:BRIGHT,ANALOG_EN,CLOCK;CMDS:SETUP:BRIGHT:AN=0-255,BL=0-255,DISP=0-15|ANALOG_EN:0/1|CLOCK:0/1;");
+  Serial.println(
+    "SETUP:MENU;"
+    "ITEMS:BRIGHT,ANALOG_EN,ANALOG_DB,CLOCK;"
+    "CMDS:"
+    "SETUP:BRIGHT:AN=0-255,BL=0-255,DISP=0-15|"
+    "ANALOG_EN:0/1|"
+    "ANALOG_DB:1-100|"
+    "CLOCK:0/1;"
+  );
 }
 
 // ============================================================================
 // SERIAL
 // ============================================================================
 void sendIdentAndState(){
-  Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
+  Serial.print("IDENT:");
+  Serial.print(PANEL_IDENT);
   Serial.print(";STATE:RUNNING;");
+  Serial.print("ANALOG_DB:");
+  Serial.print(analogDeadband);
+  Serial.print(";");
   Serial.println();
 }
 
@@ -603,6 +676,9 @@ void processIncomingLine(const String &line){
     } else if(key.equalsIgnoreCase("LED2")){ // Direct GPIO bank 2 (8 outputs)
       desiredGpioLed2 = parseBin8(val); applyOutputs();
       if(ackEnabled){ Serial.print("ACK:LED2:"); Serial.println(bin8(desiredGpioLed2)); }
+    } else if(key.equalsIgnoreCase("LED8")){ // Direct GPIO bank 3 (A7 = Bit0)
+      desiredGpioLed3 = parseBin8(val);applyOutputs();
+        if(ackEnabled){Serial.print("ACK:LED8:");Serial.println(bin8(desiredGpioLed3)); }
     } else if(key.equalsIgnoreCase("LED3")){ // BRK driver high byte
       uint8_t v=parseBin8(val); desiredBrkLed = (desiredBrkLed & 0x00FF) | (uint16_t(v)<<8); applyOutputs();
       if(ackEnabled){ Serial.print("ACK:LED3:"); Serial.println(bin8(v)); }
@@ -727,17 +803,32 @@ void processIncomingLine(const String &line){
       chronoRowCHR = "00.00";
       renderChronoDisplays();
       Serial.println("CHR:RESET");
-    } else if(key.equalsIgnoreCase("ANALOG_EN")){ analogReportEnabled = (val=="1" || val.equalsIgnoreCase("ON")); Serial.print("ANALOG_EN:"); Serial.println(analogReportEnabled?"ON":"OFF");
-    } else if(key.equalsIgnoreCase("DEBUG_SR")){
-      // Debug: read raw shift register values before inversion
-      digitalWrite(inLatchPin, LOW); delayMicroseconds(20);
-      digitalWrite(inLatchPin, HIGH); delayMicroseconds(20);
-      byte raw1 = shiftIn(inDataPin, inClkPin, MSBFIRST);
-      byte raw2 = shiftIn(inDataPin, inClkPin, MSBFIRST);
-      Serial.print("DEBUG_SR:RAW1="); Serial.print(bin8(raw1));
-      Serial.print(";RAW2="); Serial.print(bin8(raw2));
-      Serial.print(";INV1="); Serial.print(bin8(~raw1));
-      Serial.print(";INV2="); Serial.println(bin8(~raw2));
+    } 
+    
+    else if(key.equalsIgnoreCase("ANALOG_EN")){
+        analogReportEnabled =
+            (val=="1" || val.equalsIgnoreCase("ON"));
+
+        Serial.print("ANALOG_EN:");
+        Serial.println(analogReportEnabled?"ON":"OFF");
+    }
+    else if(key.equalsIgnoreCase("ANALOG_DB")){
+        analogDeadband = constrain(val.toInt(), 1, 100);
+
+        Serial.print("ANALOG_DB:");
+        Serial.println(analogDeadband);
+    }
+
+     else if(key.equalsIgnoreCase("DEBUG_SR")){
+     // Debug: read raw shift register values before inversion
+     digitalWrite(inLatchPin, LOW); delayMicroseconds(20);
+     digitalWrite(inLatchPin, HIGH); delayMicroseconds(20);
+     byte raw1 = shiftIn(inDataPin, inClkPin, MSBFIRST);
+     byte raw2 = shiftIn(inDataPin, inClkPin, MSBFIRST);
+     Serial.print("DEBUG_SR:RAW1="); Serial.print(bin8(raw1));
+     Serial.print(";RAW2="); Serial.print(bin8(raw2));
+     Serial.print(";INV1="); Serial.print(bin8(~raw1));
+     Serial.print(";INV2="); Serial.println(bin8(~raw2));
     } else if(key.equalsIgnoreCase("DEBUG_PIN")){
       // Debug: read specific pin or all direct pins
       if(val.length()>0){
@@ -794,11 +885,21 @@ void setup(){
   pinMode(blLatchPin, OUTPUT); pinMode(blClkPin, OUTPUT); pinMode(blDataPin, OUTPUT);
   for(int i=0;i<8;i++) pinMode(ledGpioPins1[i], OUTPUT);
   for(int i=0;i<8;i++) pinMode(ledGpioPins2[i], OUTPUT);
+  for(int i=0;i<8;i++) pinMode(ledGpioPins3[i], OUTPUT);
   pinMode(annuPWM, OUTPUT); pinMode(backlightPWM, OUTPUT); pinMode(displayPWM, OUTPUT);
   pinMode(inDataPin, INPUT); pinMode(inClkPin, OUTPUT); pinMode(inLatchPin, OUTPUT);
   for(int i=0;i<NUM_DIRECT_PINS; i++) pinMode(directInPins[i], INPUT_PULLUP);
-  for(unsigned i=0;i<sizeof(analogPins)/sizeof(analogPins[0]); i++) pinMode(analogPins[i], INPUT);
+  for(unsigned i=0;i<sizeof(analogPins)/sizeof(analogPins[0]); i++)
+      pinMode(analogPins[i], INPUT);
+
+  // Initiale Analogwerte erfassen
+  for(int i=0; i<6; i++)
+  {
+      lastSentAnalog[i] = analogRead(analogPins[i]);
+  }
+
   initDisplays();
+
   setLEDState(0x0000, 0x000000, 0, 0, 0);
   chronoRowCHR = "CHR ";
   chronoRowUTC = "UTC   ";
@@ -876,16 +977,46 @@ void loop(){
   if(!diagCombo) diagComboLatched = false;
 
   // Send on changes (compare all inputs against last state)
-  bool change = (inShift1!=lastInShift1)||(inShift2!=lastInShift2);
-  for(int g=0; g<NUM_DIRECT_GROUPS && !change; g++){
-    if(inDirect[g]!=lastInDirect[g]) change = true;
-  }
-  if(change){ 
-    lastInShift1=inShift1; 
-    lastInShift2=inShift2; 
-    for(int g=0; g<NUM_DIRECT_GROUPS; g++) lastInDirect[g]=inDirect[g];
-    sendStatus(); 
-  }
+// Send on changes (digital + analog)
+bool change = (inShift1!=lastInShift1)||(inShift2!=lastInShift2);
+
+for(int g=0; g<NUM_DIRECT_GROUPS && !change; g++)
+{
+    if(inDirect[g]!=lastInDirect[g])
+        change = true;
+}
+
+// Analogänderungen erkennen
+bool analogChange = false;
+
+if(analogReportEnabled)
+{
+    for(int i=0; i<6; i++)
+    {
+        int v = analogRead(analogPins[i]);
+
+        if(abs(v - lastSentAnalog[i]) >= analogDeadband)
+        {
+            analogChange = true;
+            break;
+        }
+    }
+}
+
+if(change || analogChange)
+{
+    lastInShift1 = inShift1;
+    lastInShift2 = inShift2;
+
+    for(int g=0; g<NUM_DIRECT_GROUPS; g++)
+        lastInDirect[g] = inDirect[g];
+
+    // aktuelle Analogwerte als Referenz übernehmen
+    for(int i=0; i<6; i++)
+        lastSentAnalog[i] = analogRead(analogPins[i]);
+
+    sendStatus();
+}
   
   // Update clock if enabled
   updateClock();
