@@ -50,7 +50,7 @@ const int pinStby      = A0;  // STBY   → IN3 bit 6
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "ATC, v1.0 MAQ";
+const char* PANEL_IDENT = "ATC, v1.1 MAQ";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
 
@@ -80,6 +80,15 @@ uint8_t hwBrightness = 0;
 // ============================================================================
 String displayText4 = "    ";  // 4 chars for the single 4-digit display
 uint8_t displayBrightness = 15;  // MAX7219 brightness (0-15), default full
+
+// XPDR multi-source display routing
+//   dsp1 = complete squawk   (L:N_FREQ_XPDR_SELECTED)
+//   dsp2 = char count 0..4   (L:N_PED_XPDR_CHAR_DISPLAYED)
+//   dsp3 = partial/standby   (L:N_FREQ_STANDBY_XPDR_SELECTED)
+String dsp1Value = "";      // complete squawk code
+int    dsp2Value = -1;      // character count (-1 = never received, 0..4)
+String dsp3Value = "";      // standby / partial entry
+bool   dsp2Active = false;  // true once first dsp2 received (enables routing)
 
 // Scrolling support for the 4-digit display
 String currentFull = "";
@@ -233,6 +242,10 @@ bool offlineMessageShown = false;
 unsigned long diagStartTime = 0;
 int diagStage = 0;
 bool diagComboWasActive = false;
+
+// Boot complete timestamp for DIAG timeout (30s after boot)
+unsigned long bootCompleteTime = 0;
+const unsigned long DIAG_AVAILABLE_MS = 30000;  // 30 seconds
 
 // Menu related state
 bool menuInitialized = false;
@@ -411,6 +424,30 @@ void updateDisplay4(const String &text) {
   }
 }
 
+// Left-to-right variant used only for XPDR squawk display
+// MAX7219: row 0 = rightmost, row 3 = leftmost → 3-digitPos maps first char to left
+void updateDisplay4Left(const String &text) {
+  int textPos = 0;
+  for (int digitPos = 0; digitPos < 4; digitPos++) {
+    if (textPos >= text.length()) {
+      lc.setRow(DISP_DEVICE, 3 - digitPos, 0b00000000);
+      continue;
+    }
+    char c = text.charAt(textPos);
+    if (c == '.') {
+      textPos++;
+      if (textPos >= text.length()) {
+        lc.setRow(DISP_DEVICE, 3 - digitPos, 0b00000000);
+        continue;
+      }
+      c = text.charAt(textPos);
+    }
+    byte pattern = charTo7Seg(c);
+    lc.setRow(DISP_DEVICE, 3 - digitPos, pattern);
+    textPos++;
+  }
+}
+
 void displayTextFull(const String &text) {
   currentFull = text;
   // Determine if scrolling is needed (count effective chars excluding '.')
@@ -577,6 +614,52 @@ void maybeSendIdentStartup() {
 }
 
 // ============================================================================
+// XPDR DISPLAY ROUTING — selects dsp1 (complete) or dsp3 (partial) via dsp2
+// ============================================================================
+void routeXpdrDisplay() {
+  // dsp2 tells how many characters are entered (0..4)
+  //   0..3 → show first N chars of dsp3 (STBY) on leftmost digits
+  //   4    → show dsp1 (active XPDR) on all 4 digits
+  //   never received → fall back to dsp1 (backward compatible)
+  
+  String source;
+  int showDigits;
+  
+  if (dsp2Active && dsp2Value >= 0 && dsp2Value <= 3) {
+    source = dsp3Value;        // partial entry
+    showDigits = dsp2Value;    // show exactly this many digits from the left
+  } else {
+    source = dsp1Value;        // complete squawk (or fallback)
+    showDigits = 4;            // all 4 digits
+  }
+  
+  // Negative values → display OFF (XPDR inactive)
+  if (source.startsWith("-")) {
+    lc.shutdown(DISP_DEVICE, true);
+    displayText4 = "    ";
+    return;
+  }
+  
+  lc.shutdown(DISP_DEVICE, false);
+  
+  // Strip decimal point — XPDR frequency is always integer
+  source.replace(".", "");
+  
+  // Build exactly showDigits characters, left-aligned, rest blank
+  String out = "";
+  for (int i = 0; i < 4; i++) {
+    if (i < showDigits && i < source.length()) {
+      out += source.charAt(i);
+    } else {
+      out += ' ';
+    }
+  }
+  
+  displayText4 = out;
+  updateDisplay4Left(out);
+}
+
+// ============================================================================
 // SERIAL COMMAND PARSING (RMP-compatible protocol)
 // ============================================================================
 void processIncomingLine(const String &line) {
@@ -599,11 +682,13 @@ void processIncomingLine(const String &line) {
         continue;
       }
       if (token.equalsIgnoreCase("DIAG")) {
-        if (bootState == BOOT_RUNNING) {
+        if (bootState == BOOT_RUNNING && (millis() - bootCompleteTime) < DIAG_AVAILABLE_MS) {
           bootState = BOOT_DIAG_MENU;
           diagStartTime = millis();
           diagStage = 0;
           Serial.println("DIAG:START;");
+        } else if (bootState == BOOT_RUNNING) {
+          Serial.println("DIAG:LOCKED;");  // DIAG timeout expired
         }
         continue;
       }
@@ -641,8 +726,21 @@ void processIncomingLine(const String &line) {
     }
     else if (key.equalsIgnoreCase("DSP1")) {
       if (!hostOnline) { hostOnline = true; }  // implicit online
-      displayText4 = val;
-      updateDisplay4(displayText4);
+      dsp1Value = val;
+      routeXpdrDisplay();
+    }
+    else if (key.equalsIgnoreCase("DSP2")) {
+      // Character count 0..4 from XPDR (internal routing only, no physical display)
+      if (!hostOnline) { hostOnline = true; }
+      dsp2Value = val.toInt();
+      dsp2Active = true;
+      routeXpdrDisplay();
+    }
+    else if (key.equalsIgnoreCase("DSP3")) {
+      // Standby / partial squawk entry (shown while dsp2 = 0..3)
+      if (!hostOnline) { hostOnline = true; }
+      dsp3Value = val;
+      routeXpdrDisplay();
     }
     else if (key.equalsIgnoreCase("STATE")) {
       // STATE:00 = offline, STATE:01 = online
@@ -734,12 +832,14 @@ void processSerialTokensFromHost() {
         continue;
       }
       if (tokenUp == "DIAG") {
-        if (bootState == BOOT_RUNNING) {
+        if (bootState == BOOT_RUNNING && (millis() - bootCompleteTime) < DIAG_AVAILABLE_MS) {
           bootState = BOOT_DIAG_MENU;
           diagStartTime = millis();
           diagStage = 0;
           menuInitialized = false;
           Serial.println("DIAG:MENU_START;");
+        } else if (bootState == BOOT_RUNNING) {
+          Serial.println("DIAG:LOCKED;");  // DIAG timeout expired
         }
         continue;
       }
@@ -812,6 +912,7 @@ void runBootSequence() {
     setLEDState(0x00, false, 0);
     displayTextFull("    ");
     bootState = BOOT_RUNNING;
+    bootCompleteTime = millis();     // record when boot finished for DIAG timeout
     forceSendNext = true;
     maybeSendIdentStartup();
   }
@@ -1417,17 +1518,21 @@ void do_brightness_fade_step(unsigned long elapsed) {
 }
 
 // Check for DIAG combo: CLR (IN3 bit 5) + "7" (IN2 bit 7) pressed simultaneously
+// Only available within DIAG_AVAILABLE_MS (30s) after boot
 void checkDiagCombo() {
   bool clrActive = (inputState3 & (1 << 5)) != 0;
   bool key7Active = (inputState2 & (1 << 7)) != 0;
   bool comboActive = clrActive && key7Active;
   
   if (bootState == BOOT_RUNNING && comboActive && !diagComboWasActive) {
-    bootState = BOOT_DIAG_MENU;
-    diagStartTime = millis();
-    diagStage = 0;
-    Serial.println("DIAG:START;");
-    diagComboWasActive = true;
+    if ((millis() - bootCompleteTime) < DIAG_AVAILABLE_MS) {
+      bootState = BOOT_DIAG_MENU;
+      diagStartTime = millis();
+      diagStage = 0;
+      Serial.println("DIAG:START;");
+      diagComboWasActive = true;
+    }
+    // If timeout expired, combo is ignored — 7 and CLR still output via normal sendStatusImmediate
   }
   else if (!comboActive) {
     diagComboWasActive = false;
