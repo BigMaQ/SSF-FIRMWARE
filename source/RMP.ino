@@ -112,7 +112,15 @@ volatile uint8_t rotary2LastEncoded = 0;
 // Rotary speed detection (fast = 2 steps, slow = 1 step)
 volatile unsigned long rotary1LastChangeTime = 0;
 volatile unsigned long rotary2LastChangeTime = 0;
-const unsigned long ROTARY_FAST_THRESHOLD_MS = 50;  // < 50ms between steps = fast turn
+const unsigned long ROTARY_FAST_THRESHOLD_MS = 50;
+
+// Toggle-based double-step filter: after counting a step, skip the next
+// same-direction transition.  This reliably maps 2 quadrature edges/detent
+// to 1 counter increment, regardless of timing.
+volatile int rotary1LastDir = 0;
+volatile bool rotary1Skip = false;
+volatile int rotary2LastDir = 0;
+volatile bool rotary2Skip = false;
 // Menu-specific guard to avoid double-counting when navigating menus
 volatile unsigned long rotary1LastMenuEventTs = 0;
 const unsigned long ROTARY_MENU_MIN_MS = 180; // minimum ms between accepted rotary increments while in menu (increased to reduce double-count)
@@ -120,7 +128,7 @@ const unsigned long ROTARY_MENU_MIN_MS = 180; // minimum ms between accepted rot
 // MobiFlight-style rotary encoder configuration
 // Format: 0b<RT2_config><RT1_config> where each is 2 bits:
 // 00 = No sensitivity (all transitions), 01 = Low (half-step), 10 = Medium (detent), 11 = High (strict)
-uint8_t ROTARY_CONFIG = 0b1010;  // Both encoders: Medium sensitivity (detent mode) - Default 10
+uint8_t ROTARY_CONFIG = 0b1010;  // Both encoders: Medium sensitivity; PC-side rot_div=2 handles the rest
 
 // Extract individual configs (updated dynamically)
 uint8_t RT1_SENSITIVITY = (ROTARY_CONFIG >> 0) & 0b11;  // Bits 0-1
@@ -727,9 +735,16 @@ void updateRotary1() {
   }
   
   if (validTransition) {
-    // Debounce: only count if enough time passed since last change (2ms minimum)
-    if ((now - rotary1LastChangeTime) >= 2 || rotary1LastChangeTime == 0) {
-      // If we're in DIAG menu, enforce a slightly longer minimum interval to avoid double-counts
+    // Toggle filter: count on first edge of a pair, skip the second.
+    // Direction change resets the skip flag immediately.
+    if (direction != rotary1LastDir) {
+      rotary1Skip = false;
+      rotary1LastDir = direction;
+    }
+    if (rotary1Skip) {
+      rotary1Skip = false;
+    } else if ((now - rotary1LastChangeTime) >= 2 || rotary1LastChangeTime == 0) {
+      rotary1Skip = true;
       if (bootState == BOOT_DIAG_MENU) {
         if ((now - rotary1LastMenuEventTs) >= ROTARY_MENU_MIN_MS) {
           rotary1Counter += (direction * step);
@@ -806,8 +821,15 @@ void updateRotary2() {
   }
   
   if (validTransition) {
-    // Debounce: only count if enough time passed since last change (2ms minimum)
-    if ((now - rotary2LastChangeTime) >= 2 || rotary2LastChangeTime == 0) {
+    // Toggle filter: count on first edge of a pair, skip the second.
+    if (direction != rotary2LastDir) {
+      rotary2Skip = false;
+      rotary2LastDir = direction;
+    }
+    if (rotary2Skip) {
+      rotary2Skip = false;
+    } else if ((now - rotary2LastChangeTime) >= 2 || rotary2LastChangeTime == 0) {
+      rotary2Skip = true;
       rotary2Counter += (direction * step);
       rotary2LastChangeTime = now;
     }
