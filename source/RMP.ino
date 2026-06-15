@@ -41,7 +41,8 @@ const int pwmBrightness = 3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RMP, v1.1 MAQ";
+const char* PANEL_IDENT = "RMP, v1.3 MAQ";
+const char  FW_VERSION[] = "1.3";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
 
@@ -72,13 +73,13 @@ uint8_t hwBrightness = 0;
 // ============================================================================
 // DISPLAY STATE
 // ============================================================================
-String displayLeft  = "      ";  // 6 chars for left display
-String displayRight = "      ";  // 6 chars for right display
+char displayLeft[12] = "      ";  // up to 6 chars + DP markers + null
+char displayRight[12] = "      ";
 uint8_t displayBrightness = 15;  // MAX7219 brightness (0-15), default full
 
 // Scrolling support for displays: hold full strings and scroll window if >6 chars
-String currentLeftFull = "";
-String currentRightFull = "";
+char currentLeftFull[21] = "";   // max 20 chars + null
+char currentRightFull[21] = "";
 int scrollOffsetLeft = 0;
 int scrollOffsetRight = 0;
 unsigned long lastScrollTs = 0;
@@ -138,8 +139,8 @@ uint8_t RT2_SENSITIVITY = (ROTARY_CONFIG >> 2) & 0b11;  // Bits 2-3
 uint8_t CFG_BUTTON_DEBOUNCE = 12;     // Button debounce time in ms (00-99), default 12ms
 uint16_t CFG_LED_REFRESH = 1200;      // LED refresh interval in ms, default 1200ms
 uint16_t CFG_DISPLAY_REFRESH = 1200;  // Display refresh interval in ms, default 1200ms
-String CFG_AIRCRAFT_REG = "D-A320";   // Aircraft registration, default D-A320, max 8 chars
-String CFG_PCB_VERSION = "PCB 1.0";   // PCB version, default PCB 1.0, max 8 chars
+char CFG_AIRCRAFT_REG[9] = "D-A320";  // Aircraft registration, default D-A320, max 8 chars + null
+char CFG_PCB_VERSION[9] = "PCB 1.0";  // PCB version, default PCB 1.0, max 8 chars + null
 bool CFG_PCB_IS_12 = false;            // Helper flag: true if PCB version is 1.2
 
 // EEPROM storage layout for configuration
@@ -159,7 +160,7 @@ int editPos = 0;
 
 // PIN & Settings state (Serial-based, not menu-based)
 bool settingsEnabled = false;
-const String SETTINGS_PIN = "0815";
+const char SETTINGS_PIN[] = "0815";
 
 // ============================================================================
 // TIMING / THROTTLES / DEBOUNCE
@@ -319,8 +320,8 @@ unsigned long bootSequenceStart = 0;
 
 // External state control (from host via STATE:00/01)
 bool hostOnline = false;  // false = offline, true = online
-String offlineMessage1 = "no FS ";
-String offlineMessage2 = "onLinE";
+const char offlineMessage1[] = "no FS ";
+const char offlineMessage2[] = "onLinE";
 unsigned long offlineDisplayStart = 0;  // When offline message was shown
 const unsigned long OFFLINE_DISPLAY_DURATION_MS = 10000;  // Show for 10 seconds
 bool offlineMessageShown = false;  // Track if message is currently displayed
@@ -359,32 +360,37 @@ bool diagReturnToMenu = false;
 // ============================================================================
 // RUNTIME BUFFERS / FLAGS
 // ============================================================================
-String serialAccum = "";
+char serialAccum[64] = "";
 bool forceSendNext = false;
 
 // ============================================================================
 // HELPER FUNCTIONS - STRING FORMATTING
 // ============================================================================
-String bin8(byte b) {
-  String s = "";
-  for (int i = 7; i >= 0; i--) s += ((b & (1 << i)) ? '1' : '0');
-  return s;
+void bin8(char* out, byte b) {
+  for (int i = 0; i < 8; i++) out[i] = ((b >> (7 - i)) & 1) ? '1' : '0';
+  out[8] = 0;
 }
 
-uint8_t parseBin8(const String &s) {
+uint8_t parseBin8(const char* s) {
   uint8_t v = 0;
-  for (int i = 0; i < s.length(); i++) {
-    char c = s.charAt(i);
-    if (c == '0' || c == '1') v = (v << 1) | (c == '1' ? 1 : 0);
+  for (int i = 0; s[i]; i++) {
+    if (s[i] == '0' || s[i] == '1') v = (v << 1) | (s[i] == '1' ? 1 : 0);
   }
   return v;
 }
 
 void refreshPCBVersionFlags() {
-  String pcbNorm = CFG_PCB_VERSION;
-  pcbNorm.toUpperCase();
-  pcbNorm.replace(" ", "");
-  CFG_PCB_IS_12 = (pcbNorm == "PCB1.2");
+  // Check if PCB version is "PCB1.2" (case-insensitive, ignore spaces)
+  char norm[9];
+  uint8_t j = 0;
+  for (uint8_t i = 0; CFG_PCB_VERSION[i] && j < 8; i++) {
+    char c = CFG_PCB_VERSION[i];
+    if (c == ' ') continue;
+    if (c >= 'a' && c <= 'z') c -= 32;
+    norm[j++] = c;
+  }
+  norm[j] = 0;
+  CFG_PCB_IS_12 = (norm[0] == 'P' && norm[1] == 'C' && norm[2] == 'B' && norm[3] == '1' && norm[4] == '.' && norm[5] == '2' && norm[6] == 0);
 }
 
 // Perform a fast software reset using the watchdog
@@ -401,11 +407,10 @@ void triggerSoftwareReset(bool showMessage = true) {
   }
 }
 
-uint16_t parseBin16(const String &s) {
+uint16_t parseBin16(const char* s) {
   uint16_t v = 0;
-  for (int i = 0; i < s.length(); i++) {
-    char c = s.charAt(i);
-    if (c == '0' || c == '1') v = (v << 1) | (c == '1' ? 1 : 0);
+  for (int i = 0; s[i]; i++) {
+    if (s[i] == '0' || s[i] == '1') v = (v << 1) | (s[i] == '1' ? 1 : 0);
   }
   return v;
 }
@@ -488,32 +493,33 @@ byte charTo7Seg(char c) {
   }
 }
 
-void updateDisplay(int device, const String &text) {
+void updateDisplay(int device, const char* text) {
   // text is up to 6 characters; device 0 or 1
   // MAX7219: digit 0 is rightmost, digit 7 is leftmost (we use 0-5 for 6 digits)
+  int textLen = strlen(text);
   int textPos = 0;
   for (int digitPos = 0; digitPos < 6; digitPos++) {
-    if (textPos >= text.length()) {
+    if (textPos >= textLen) {
       lc.setRow(device, 5 - digitPos, 0b00000000);  // Blank remaining digits
       continue;
     }
     
-    char c = text.charAt(textPos);
+    char c = text[textPos];
     
     // Skip decimal points - they're not characters, they're modifiers
     if (c == '.') {
       textPos++;
-      if (textPos >= text.length()) {
+      if (textPos >= textLen) {
         lc.setRow(device, 5 - digitPos, 0b00000000);
         continue;
       }
-      c = text.charAt(textPos);
+      c = text[textPos];
     }
     
     byte pattern = charTo7Seg(c);
     
     // Check if next char is a decimal point (applies to current digit)
-    if (textPos + 1 < text.length() && text.charAt(textPos + 1) == '.') {
+    if (textPos + 1 < textLen && text[textPos + 1] == '.') {
       pattern |= 0b10000000;  // Set DP bit
     }
     
@@ -522,87 +528,67 @@ void updateDisplay(int device, const String &text) {
   }
 }
 
-void displayText(const String &left, const String &right) {
-  // Set full strings and prepare scroll state
-  currentLeftFull = left;
-  currentRightFull = right;
-  // Determine if scrolling is needed (count effective characters excluding '.' which are DP markers)
-  auto effectiveLength = [](const String &s) {
-    int cnt = 0;
-    for (int i = 0; i < s.length(); i++) if (s.charAt(i) != '.') cnt++;
-    return cnt;
-  };
-  scrollLeftEnabled = (effectiveLength(currentLeftFull) > 6);
-  scrollRightEnabled = (effectiveLength(currentRightFull) > 6);
+// Helper: count effective chars (excluding '.') in a string
+static int effLen(const char* s) {
+  int cnt = 0;
+  for (int i = 0; s[i]; i++) if (s[i] != '.') cnt++;
+  return cnt;
+}
+
+// Helper: build a 6-char window from full string, preserving '.' as DP markers
+static void buildWin(char* out, const char* full, int offsetChars) {
+  int placed = 0;
+  int skipped = 0;
+  int i = 0;
+  for (; full[i] && placed < 6; i++) {
+    char c = full[i];
+    if (c != '.') {
+      if (skipped < offsetChars) { skipped++; continue; }
+      placed++;
+    }
+    *out++ = c;
+  }
+  while (placed < 6) { *out++ = ' '; placed++; }
+  *out = 0;
+}
+
+void displayText(const char* left, const char* right) {
+  // Copy full strings for scrolling
+  strncpy(currentLeftFull, left, 20); currentLeftFull[20] = 0;
+  strncpy(currentRightFull, right, 20); currentRightFull[20] = 0;
+  
+  scrollLeftEnabled = (effLen(currentLeftFull) > 6);
+  scrollRightEnabled = (effLen(currentRightFull) > 6);
   scrollOffsetLeft = 0;
   scrollOffsetRight = 0;
   lastScrollTs = millis();
 
-  // Windowing that preserves '.' so DP can be shown. We place up to 6 digits/letters,
-  // but we keep any '.' that belong to those digits in the output string.
-  auto buildWindow = [](const String &full) {
-    String out = "";
-    int placed = 0;
-    for (int i = 0; i < full.length() && placed < 6; i++) {
-      char c = full.charAt(i);
-      out += c;              // keep char (including '.')
-      if (c != '.') placed++; // count only real digits/letters
-    }
-    // Pad with spaces if fewer than 6 chars were placed
-    while (placed < 6) { out += ' '; placed++; }
-    return out;
-  };
-  String leftWindow = buildWindow(currentLeftFull);
-  String rightWindow = buildWindow(currentRightFull);
-  updateDisplay(DISP_LEFT, leftWindow);
-  updateDisplay(DISP_RIGHT, rightWindow);
-  displayLeft = leftWindow;
-  displayRight = rightWindow;
+  buildWin(displayLeft, currentLeftFull, 0);
+  buildWin(displayRight, currentRightFull, 0);
+  updateDisplay(DISP_LEFT, displayLeft);
+  updateDisplay(DISP_RIGHT, displayRight);
 }
 
 // Advance scroll offsets if needed and refresh displays
 void scrollTick(unsigned long now) {
   if ((now - lastScrollTs) < SCROLL_INTERVAL_MS) return;
   lastScrollTs = now;
-  auto effectiveLength = [](const String &s) {
-    int cnt = 0;
-    for (int i = 0; i < s.length(); i++) if (s.charAt(i) != '.') cnt++;
-    return cnt;
-  };
-  // Windowing for scrolling that preserves '.' so DP renders
-  auto buildWindow = [](const String &full, int offsetChars) {
-    String out = "";
-    int placed = 0;
-    int skipped = 0;
-    for (int i = 0; i < full.length() && placed < 6; i++) {
-      char c = full.charAt(i);
-      if (c != '.') {
-        if (skipped < offsetChars) { skipped++; continue; }
-        placed++;
-      }
-      out += c; // keep character, including '.'
-    }
-    while (placed < 6) { out += ' '; placed++; }
-    return out;
-  };
 
   if (scrollLeftEnabled) {
-    int elen = effectiveLength(currentLeftFull);
+    int elen = effLen(currentLeftFull);
     int maxOffset = max(0, elen - 6);
     scrollOffsetLeft++;
     if (scrollOffsetLeft > maxOffset) scrollOffsetLeft = 0;
-    String leftWindow = buildWindow(currentLeftFull, scrollOffsetLeft);
-    updateDisplay(DISP_LEFT, leftWindow);
-    displayLeft = leftWindow;
+    buildWin(displayLeft, currentLeftFull, scrollOffsetLeft);
+    updateDisplay(DISP_LEFT, displayLeft);
   }
   if (scrollRightEnabled) {
-    int elen = effectiveLength(currentRightFull);
+    int elen = effLen(currentRightFull);
     int maxOffset = max(0, elen - 6);
     scrollOffsetRight++;
     if (scrollOffsetRight > maxOffset) scrollOffsetRight = 0;
-    String rightWindow = buildWindow(currentRightFull, scrollOffsetRight);
-    updateDisplay(DISP_RIGHT, rightWindow);
-    displayRight = rightWindow;
+    buildWin(displayRight, currentRightFull, scrollOffsetRight);
+    updateDisplay(DISP_RIGHT, displayRight);
   }
 }
 
@@ -859,246 +845,325 @@ void maybeSendIdentStartup() {
 // ============================================================================
 // SERIAL COMMAND PARSING
 // ============================================================================
-void processIncomingLine(const String &line) {
-  int start = 0;
-  while (true) {
-    int sep = line.indexOf(';', start);
-    if (sep < 0) break;
-    String token = line.substring(start, sep);
-    start = sep + 1;
-    token.trim();
-    if (token.length() == 0) continue;
-    
-    if (token.indexOf(':') < 0) {
-      if (token.equalsIgnoreCase("VER") || token.equalsIgnoreCase("VERSION")) {
-        sendIdentAndState();
-        continue;
-      }
-      if (token.equalsIgnoreCase("REQ")) {
-        sendStatusImmediate();
-        continue;
-      }
-      if (token.equalsIgnoreCase("DIAG")) {
-        if (bootState == BOOT_RUNNING) {
-          bootState = BOOT_DIAG_MENU;
-          diagStartTime = millis();
-          diagStage = 0;
-          Serial.println("DIAG:START;");
+
+// Helper: case-insensitive compare of two null-terminated strings
+static bool strieq(const char* a, const char* b) {
+  while (*a && *b) {
+    char ca = (*a >= 'a' && *a <= 'z') ? *a - 32 : *a;
+    char cb = (*b >= 'a' && *b <= 'z') ? *b - 32 : *b;
+    if (ca != cb) return false;
+    a++; b++;
+  }
+  return *a == *b;
+}
+
+// Helper: check if a starts with prefix (case-insensitive)
+static bool stripre(const char* a, const char* prefix) {
+  while (*prefix) {
+    char ca = (*a >= 'a' && *a <= 'z') ? *a - 32 : *a;
+    char cb = (*prefix >= 'a' && *prefix <= 'z') ? *prefix - 32 : *prefix;
+    if (ca != cb) return false;
+    a++; prefix++;
+  }
+  return true;
+}
+
+// Simple atoi for char*
+static int atoi_s(const char* s) {
+  int v = 0;
+  int sign = 1;
+  while (*s == ' ') s++;
+  if (*s == '-') { sign = -1; s++; }
+  while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+  return v * sign;
+}
+
+void processIncomingLine(const char* line) {
+  char token[32];
+  int tlen = 0;
+  for (int i = 0; ; i++) {
+    char c = line[i];
+    if (c == ';' || c == 0) {
+      if (tlen == 0) { if (c == 0) break; else continue; }
+      token[tlen] = 0;
+      tlen = 0;
+      
+      // Trim trailing spaces
+      int end = strlen(token) - 1;
+      while (end >= 0 && token[end] == ' ') token[end--] = 0;
+      
+      // Trim leading spaces
+      char* tok = token;
+      while (*tok == ' ') tok++;
+      if (*tok == 0) { if (c == 0) break; else continue; }
+      
+      // Find colon
+      char* colon = strchr(tok, ':');
+      if (!colon) {
+        if (strieq(tok, "VER") || strieq(tok, "VERSION") || strieq(tok, "IDENT")) {
+          sendIdentAndState();
+        } else if (strieq(tok, "REQ")) {
+          sendStatusImmediate();
+        } else if (strieq(tok, "DIAG")) {
+          if (bootState == BOOT_RUNNING) {
+            bootState = BOOT_DIAG_MENU;
+            diagStartTime = millis();
+            diagStage = 0;
+            Serial.println("DIAG:START;");
+          }
+        } else if (stripre(tok, "SET ")) {
+          // SET without colon: EXIT, WRITE
+          char* sc = tok + 4;
+          while (*sc == ' ') sc++;
+          if (stripre(sc, "EXIT")) {
+            settingsEnabled = false;
+            Serial.println("SET EXIT:OK ;");
+          } else if (stripre(sc, "WRITE")) {
+            if (settingsEnabled) {
+              uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, CFG_AIRCRAFT_REG, CFG_PCB_VERSION);
+              for (int i = 0; i < 8; i++) {
+                EEPROM.write(EEPROM_BASE_ADDR + 3 + i, (i < (int)strlen(CFG_AIRCRAFT_REG)) ? CFG_AIRCRAFT_REG[i] : 0);
+              }
+              for (int i = 0; i < 8; i++) {
+                EEPROM.write(EEPROM_BASE_ADDR + 11 + i, (i < (int)strlen(CFG_PCB_VERSION)) ? CFG_PCB_VERSION[i] : 0);
+              }
+              EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
+              settingsEnabled = false;
+              displayText("SAUE ", "SAUE ");
+              delay(1000);
+              Serial.println("WRITE:OK ;");
+              triggerSoftwareReset(false);
+            } else {
+              Serial.println("WRITE:LOCKED ;");
+            }
+          }
         }
-        continue;
+        if (c == 0) break; else continue;
       }
-      continue;
-    }
-    
-    int colon = token.indexOf(':');
-    if (colon < 0) continue;
-    String key = token.substring(0, colon);
-    String val = token.substring(colon + 1);
-    key.trim();
-    val.trim();
-    
-    if (key.equalsIgnoreCase("LED1")) {
-      desiredLedState = (desiredLedState & 0x00FF) | (parseBin8(val) << 8);
-      applyLEDOutputs();
-    }
-    else if (key.equalsIgnoreCase("LED2")) {
-      desiredLedState = (desiredLedState & 0xFF00) | parseBin8(val);
-      applyLEDOutputs();
-    }
-    else if (key.equalsIgnoreCase("LED3")) {
-      // Format: "LED3:01" where bit 0 = ILS, bit 1 = MLS
-      uint8_t bits = parseBin8(val);
-      desiredIlsLed = bits & 0b01;
-      desiredMlsLed = bits & 0b10;
-      applyLEDOutputs();
-    }
-    else if (key.equalsIgnoreCase("BL")) {
-      desiredBrightness = constrain(val.toInt(), 0, 255);
-      applyLEDOutputs();
-    }
-    else if (key.equalsIgnoreCase("DISP_BL")) {
-      setDisplayBrightness(val.toInt());
-    }
-    else if (key.equalsIgnoreCase("DSP1")) {
-      displayLeft = val;
-      updateDisplay(DISP_LEFT, displayLeft);
-    }
-    else if (key.equalsIgnoreCase("DSP2")) {
-      displayRight = val;
-      updateDisplay(DISP_RIGHT, displayRight);
-    }
-    else if (key.equalsIgnoreCase("STATE")) {
-      // STATE:00 = offline, STATE:01 = online
-      hostOnline = (val == "01" || val == "1");
-      // If going online, clear offline message
-      if (hostOnline && displayLeft == offlineMessage1 && displayRight == offlineMessage2) {
-        displayText("      ", "      ");
+      
+      *colon = 0;
+      char* key = tok;
+      char* val = colon + 1;
+      // Trim key
+      int kend = strlen(key) - 1;
+      while (kend >= 0 && key[kend] == ' ') key[kend--] = 0;
+      char* kp = key;
+      while (*kp == ' ') kp++;
+      // Trim val
+      while (*val == ' ') val++;
+      int vend = strlen(val) - 1;
+      while (vend >= 0 && val[vend] == ' ') val[vend--] = 0;
+      
+      if (strieq(kp, "LED1")) {
+        desiredLedState = (desiredLedState & 0x00FF) | (parseBin8(val) << 8);
+        applyLEDOutputs();
       }
-    }
-    else if (key.equalsIgnoreCase("REQ")) {
-      forceSendNext = true;
-    }
-    else if (key.equalsIgnoreCase("VER")) {
-      sendIdentAndState();
-    }
-    else if (key.equalsIgnoreCase("CFG")) {
-      // Parse configuration: CFG:ROT1010;DEB15;LED1000;DSP800;REG:D-AIDA
-      String cfgStr = val;
-      int pos = 0;
-      while (pos < cfgStr.length()) {
-        int nextSep = cfgStr.indexOf(';', pos);
-        if (nextSep < 0) nextSep = cfgStr.length();
-        String param = cfgStr.substring(pos, nextSep);
-        param.trim();
-        
-        if (param.startsWith("ROT")) {
-          // ROT followed by 4 binary digits: ROT1010 = 0b1010
-          String rotVal = param.substring(3);
-          if (rotVal.length() >= 4) {
-            uint8_t rt1 = ((rotVal.charAt(2) == '1') ? 2 : 0) | ((rotVal.charAt(3) == '1') ? 1 : 0);
-            uint8_t rt2 = ((rotVal.charAt(0) == '1') ? 2 : 0) | ((rotVal.charAt(1) == '1') ? 1 : 0);
+      else if (strieq(kp, "LED2")) {
+        desiredLedState = (desiredLedState & 0xFF00) | parseBin8(val);
+        applyLEDOutputs();
+      }
+      else if (strieq(kp, "LED3")) {
+        uint8_t bits = parseBin8(val);
+        desiredIlsLed = bits & 0b01;
+        desiredMlsLed = bits & 0b10;
+        applyLEDOutputs();
+      }
+      else if (strieq(kp, "BL")) {
+        desiredBrightness = constrain(atoi_s(val), 0, 255);
+        applyLEDOutputs();
+      }
+      else if (strieq(kp, "DISP_BL")) {
+        setDisplayBrightness(atoi_s(val));
+      }
+      else if (strieq(kp, "DSP1")) {
+        int dspVal = atoi_s(val);
+        if (dspVal == -1) {
+          // Display OFF → all segments blank
+          for (int d = 0; d < 6; d++) lc.setRow(DISP_LEFT, d, 0);
+          displayLeft[0] = 0;
+        } else if (dspVal >= 0 && dspVal <= 359) {
+          // Course mode: C-000..C-359
+          displayLeft[0] = 'C'; displayLeft[1] = '-';
+          snprintf(displayLeft + 2, 4, "%03d", dspVal);
+          displayLeft[5] = 0;
+          updateDisplay(DISP_LEFT, displayLeft);
+        } else {
+          strncpy(displayLeft, val, 6); displayLeft[6] = 0;
+          updateDisplay(DISP_LEFT, displayLeft);
+        }
+      }
+      else if (strieq(kp, "DSP2")) {
+        int dspVal = atoi_s(val);
+        if (dspVal == -1) {
+          for (int d = 0; d < 6; d++) lc.setRow(DISP_RIGHT, d, 0);
+          displayRight[0] = 0;
+        } else if (dspVal >= 0 && dspVal <= 359) {
+          displayRight[0] = 'C'; displayRight[1] = '-';
+          snprintf(displayRight + 2, 4, "%03d", dspVal);
+          displayRight[5] = 0;
+          updateDisplay(DISP_RIGHT, displayRight);
+        } else {
+          strncpy(displayRight, val, 6); displayRight[6] = 0;
+          updateDisplay(DISP_RIGHT, displayRight);
+        }
+      }
+      else if (strieq(kp, "STATE")) {
+        hostOnline = (strcmp(val, "01") == 0 || strcmp(val, "1") == 0);
+        if (hostOnline && strcmp(displayLeft, offlineMessage1) == 0 && strcmp(displayRight, offlineMessage2) == 0) {
+          displayText("      ", "      ");
+        }
+      }
+      else if (strieq(kp, "REQ")) {
+        forceSendNext = true;
+      }
+      else if (strieq(kp, "VER")) {
+        sendIdentAndState();
+      }
+      else if (strieq(kp, "CFG")) {
+        // Parse configuration: CFG:ROT1010;DEB15;LED1000;DSP800;REG:D-AIDA
+        char* cfgPtr = val;
+        while (*cfgPtr) {
+          // Skip leading spaces/semicolons
+          while (*cfgPtr == ' ' || *cfgPtr == ';') cfgPtr++;
+          if (!*cfgPtr) break;
+          
+          // Find next semicolon
+          char* semi = strchr(cfgPtr, ';');
+          if (semi) *semi = 0;
+          
+          if (stripre(cfgPtr, "ROT") && strlen(cfgPtr) >= 7) {
+            // ROT1010
+            uint8_t rt1 = ((cfgPtr[5] == '1') ? 2 : 0) | ((cfgPtr[6] == '1') ? 1 : 0);
+            uint8_t rt2 = ((cfgPtr[3] == '1') ? 2 : 0) | ((cfgPtr[4] == '1') ? 1 : 0);
             ROTARY_CONFIG = (rt2 << 2) | rt1;
             RT1_SENSITIVITY = rt1;
             RT2_SENSITIVITY = rt2;
           }
-        }
-        else if (param.startsWith("DEB")) {
-          CFG_BUTTON_DEBOUNCE = constrain(param.substring(3).toInt(), 0, 99);
-        }
-        else if (param.startsWith("LED")) {
-          CFG_LED_REFRESH = constrain(param.substring(3).toInt(), 100, 10000);
-        }
-        else if (param.startsWith("DSP")) {
-          CFG_DISPLAY_REFRESH = constrain(param.substring(3).toInt(), 100, 10000);
-        }
-        else if (param.startsWith("REG:")) {
-          CFG_AIRCRAFT_REG = param.substring(4);
-          if (CFG_AIRCRAFT_REG.length() > 8) CFG_AIRCRAFT_REG = CFG_AIRCRAFT_REG.substring(0, 8);
-        }
-        
-        pos = nextSep + 1;
-      }
-    }
-    else if (token.startsWith("SET ")) {
-      // Serial-based settings: SET ENA, SET FW, SET ACID, WRITE
-      String setCmd = token.substring(4);  // Remove "SET "
-      setCmd.trim();
-      
-      if (setCmd.startsWith("ENA:")) {
-        // PIN authentication: SET ENA:0815
-        String pin = setCmd.substring(4);
-        pin.trim();
-        if (pin == SETTINGS_PIN) {
-          settingsEnabled = true;
-          Serial.println("SET ENA> ;");
-        } else {
-          Serial.println("SET ENA:FAIL ;");
-        }
-      }
-      else if (setCmd.startsWith("FW:") && settingsEnabled) {
-        // Firmware version: SET FW:1.5
-        String version = setCmd.substring(3);
-        version.trim();
-        
-        int dotPos = version.indexOf('.');
-        if (dotPos > 0 && dotPos < version.length() - 1) {
-          String majorStr = version.substring(0, dotPos);
-          String minorStr = version.substring(dotPos + 1);
-          int major = majorStr.toInt();
-          int minor = minorStr.toInt();
-          
-          if (major >= 1 && major <= 9 && minor >= 0 && minor <= 9) {
-            CFG_PCB_VERSION = String("PCb ") + major + "." + minor;
-            refreshPCBVersionFlags();
-            Serial.println("SET FW:OK ;");
-          } else {
-            Serial.println("SET FW:RANGE ;");
+          else if (stripre(cfgPtr, "DEB")) {
+            CFG_BUTTON_DEBOUNCE = constrain(atoi_s(cfgPtr + 3), 0, 99);
           }
-        } else {
-          Serial.println("SET FW:FORMAT ;");
+          else if (stripre(cfgPtr, "LED")) {
+            CFG_LED_REFRESH = constrain(atoi_s(cfgPtr + 3), 100, 10000);
+          }
+          else if (stripre(cfgPtr, "DSP")) {
+            CFG_DISPLAY_REFRESH = constrain(atoi_s(cfgPtr + 3), 100, 10000);
+          }
+          else if (stripre(cfgPtr, "REG:")) {
+            strncpy(CFG_AIRCRAFT_REG, cfgPtr + 4, 8);
+            CFG_AIRCRAFT_REG[8] = 0;
+          }
+          
+          if (semi) *semi = ';';  // Restore
+          cfgPtr = semi ? semi + 1 : cfgPtr + strlen(cfgPtr);
         }
       }
-      else if (setCmd.startsWith("ACID:") && settingsEnabled) {
-        // Aircraft ident: SET ACID:D-AIDA (format: letter-letters, max 8 chars total)
-        String ident = setCmd.substring(5);
-        ident.trim();
+      else if (stripre(tok, "SET ")) {
+        // SET commands: key is e.g. "SET ENA", val is e.g. "0815" (already split by colon)
+        // Sub-commands no longer carry the colon in the key part
+        char* setCmd = tok + 4;
+        while (*setCmd == ' ') setCmd++;
         
-        if (ident.length() >= 3 && ident.length() <= 8) {
-          // Find dash position
-          int dashPos = ident.indexOf('-');
-          if (dashPos > 0 && dashPos < ident.length() - 1) {
-            // Validate: before dash must be 1 letter, after dash all letters
-            bool valid = true;
-            if (dashPos != 1) {
-              valid = false;  // Dash must be at position 1 (after first letter)
+        if (stripre(setCmd, "ENA")) {
+          if (strcmp(val, SETTINGS_PIN) == 0) {
+            settingsEnabled = true;
+            displayText("CFG  ", "ENA  ");
+            Serial.println("SET ENA> ;");
+          } else {
+            displayText("CFG  ", "FAIL ");
+            Serial.println("SET ENA:FAIL ;");
+          }
+        }
+        else if (stripre(setCmd, "FW") && settingsEnabled) {
+          char* verStr = val;
+          while (*verStr == ' ') verStr++;
+          char* dot = strchr(verStr, '.');
+          if (dot && dot > verStr && dot < verStr + strlen(verStr) - 1) {
+            *dot = 0;
+            int major = atoi_s(verStr);
+            int minor = atoi_s(dot + 1);
+            *dot = '.';
+            if (major >= 1 && major <= 9 && minor >= 0 && minor <= 9) {
+              snprintf(CFG_PCB_VERSION, 9, "PCb %d.%d", major, minor);
+              refreshPCBVersionFlags();
+              char fwDisp[8];
+              snprintf(fwDisp, 8, "PCb %s", verStr);
+              displayText(fwDisp, " SEt  ");
+              Serial.println("SET FW:OK ;");
             } else {
-              // Check first char is alpha
-              if (!isAlpha(ident.charAt(0))) valid = false;
-              // Check rest after dash are alpha
-              for (int i = dashPos + 1; i < ident.length(); i++) {
-                if (!isAlpha(ident.charAt(i))) {
-                  valid = false;
-                  break;
-                }
-              }
+              Serial.println("SET FW:RANGE ;");
             }
-            if (valid) {
-              CFG_AIRCRAFT_REG = ident;
-              Serial.println("SET ACID:OK ;");
+          } else {
+            Serial.println("SET FW:FORMAT ;");
+          }
+        }
+        else if (stripre(setCmd, "ACID") && settingsEnabled) {
+          char* ident = val;
+          while (*ident == ' ') ident++;
+          int ilen = strlen(ident);
+          if (ilen >= 3 && ilen <= 8) {
+            char* dash = strchr(ident, '-');
+            if (dash && dash == ident + 1) {
+              bool valid = true;
+              if (!isAlpha(ident[0])) valid = false;
+              for (int i = 2; i < ilen && valid; i++) {
+                if (!isAlpha(ident[i])) valid = false;
+              }
+              if (valid) {
+                strncpy(CFG_AIRCRAFT_REG, ident, 8);
+                CFG_AIRCRAFT_REG[8] = 0;
+                Serial.println("SET ACID:OK ;");
+              } else {
+                Serial.println("SET ACID:FORMAT ;");
+              }
             } else {
               Serial.println("SET ACID:FORMAT ;");
             }
           } else {
             Serial.println("SET ACID:FORMAT ;");
           }
-        } else {
-          Serial.println("SET ACID:FORMAT ;");
         }
-      }
-      else if (setCmd.startsWith("EXIT")) {
-        settingsEnabled = false;
-        Serial.println("SET EXIT:OK ;");
-      }
-      else if (setCmd.startsWith("WRI:") && settingsEnabled) {
-        // Write to EEPROM: SET WRI:YES
-        String cmd = setCmd.substring(4);
-        cmd.trim();
-        
-        if (cmd.equalsIgnoreCase("YES")) {
-          // Use the standard saveHWInfo function
-          saveHWInfo();
+        else if (stripre(setCmd, "EXIT")) {
           settingsEnabled = false;
-          Serial.println("SET WRI:OK ;");
-          triggerSoftwareReset();
-        } else {
-          Serial.println("SET WRI:FORMAT ;");
+          Serial.println("SET EXIT:OK ;");
+        }
+        else if (stripre(setCmd, "WRI") && settingsEnabled) {
+          char* cmd = val;
+          while (*cmd == ' ') cmd++;
+          if (strieq(cmd, "YES")) {
+            saveHWInfo();
+            settingsEnabled = false;
+            displayText("SAUE ", "SAUE ");
+            delay(1000);
+            Serial.println("SET WRI:OK ;");
+            triggerSoftwareReset(false);
+          } else {
+            Serial.println("SET WRI:FORMAT ;");
+          }
+        }
+        else if (stripre(setCmd, "WRITE")) {
+          if (settingsEnabled) {
+            uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, CFG_AIRCRAFT_REG, CFG_PCB_VERSION);
+            for (int i = 0; i < 8; i++) {
+              EEPROM.write(EEPROM_BASE_ADDR + 3 + i, (i < (int)strlen(CFG_AIRCRAFT_REG)) ? CFG_AIRCRAFT_REG[i] : 0);
+            }
+            for (int i = 0; i < 8; i++) {
+              EEPROM.write(EEPROM_BASE_ADDR + 11 + i, (i < (int)strlen(CFG_PCB_VERSION)) ? CFG_PCB_VERSION[i] : 0);
+            }
+            EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
+            settingsEnabled = false;
+            displayText("SAUE ", "SAUE ");
+            delay(1000);
+            Serial.println("WRITE:OK ;");
+            triggerSoftwareReset(false);
+          } else {
+            Serial.println("WRITE:LOCKED ;");
+          }
         }
       }
-      else if (setCmd.startsWith("WRITE")) {
-        // Handle both "SET WRITE" and "SET WRITE:"
-        if (settingsEnabled) {
-          uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, 
-                                             CFG_AIRCRAFT_REG.c_str(), 
-                                             CFG_PCB_VERSION.c_str());
-          
-          for (int i = 0; i < 8; i++) {
-            char c = (i < CFG_AIRCRAFT_REG.length()) ? CFG_AIRCRAFT_REG.charAt(i) : 0;
-            EEPROM.write(EEPROM_BASE_ADDR + 3 + i, c);
-          }
-          
-          for (int i = 0; i < 8; i++) {
-            char c = (i < CFG_PCB_VERSION.length()) ? CFG_PCB_VERSION.charAt(i) : 0;
-            EEPROM.write(EEPROM_BASE_ADDR + 11 + i, c);
-          }
-          
-          EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
-          
-          settingsEnabled = false;
-          Serial.println("WRITE:OK ;");
-        } else {
-          Serial.println("WRITE:LOCKED ;");
-        }
-      }
+      
+      if (c == 0) break;
+    } else {
+      if (tlen < 31) token[tlen++] = c;
     }
   }
 }
@@ -1108,72 +1173,93 @@ void processSerialTokensFromHost() {
     char c = Serial.read();
     if (c == '\r') continue;
     if (c == '\n') c = ';';
-    serialAccum += c;
+    int alen = strlen(serialAccum);
+    if (alen < 63) { serialAccum[alen] = c; serialAccum[alen + 1] = 0; }
     
-    int idx;
-    while ((idx = serialAccum.indexOf(';')) >= 0) {
-      String token = serialAccum.substring(0, idx);
-      token.trim();
-      serialAccum = serialAccum.substring(idx + 1);
-      if (token.length() == 0) continue;
+    char* semi;
+    while ((semi = strchr(serialAccum, ';')) != NULL) {
+      *semi = 0;
+      // Copy token to local buffer BEFORE memmove shifts serialAccum
+      char token[32];
+      char* tp = serialAccum;
+      while (*tp == ' ') tp++;
+      int ti;
+      for (ti = 0; tp[ti] && ti < 31; ti++) token[ti] = tp[ti];
+      token[ti] = 0;
+      // Trim trailing spaces
+      int tend = ti - 1;
+      while (tend >= 0 && token[tend] == ' ') token[tend--] = 0;
       
-      String tokenUp = token;
-      tokenUp.toUpperCase();
+      // Shift remaining buffer
+      int remaining = strlen(semi + 1);
+      memmove(serialAccum, semi + 1, remaining + 1);
       
-      if (tokenUp == "VER" || tokenUp == "VERSION") {
-        // Show "  UEr" on left display, "rEQ  " on right display (inner digits)
-        displayText("  UEr", "rEQ  ");
-        delay(500);  // Show for 500ms
-        displayText("      ", "      ");  // Clear
+      if (token[0] == 0) continue;
+      
+      // To uppercase for comparison
+      char tokenUp[32];
+      for (ti = 0; token[ti] && ti < 31; ti++) {
+        tokenUp[ti] = (token[ti] >= 'a' && token[ti] <= 'z') ? token[ti] - 32 : token[ti];
+      }
+      tokenUp[ti] = 0;
+      
+      if (strcmp(tokenUp, "VER") == 0 || strcmp(tokenUp, "VERSION") == 0 || strcmp(tokenUp, "IDENT") == 0) {
+        // Show firmware + PCB version on displays for 5 seconds
+        char fwDisp[8];
+        snprintf(fwDisp, 8, "FRM %s", FW_VERSION);
+        char* sp = strchr(CFG_PCB_VERSION, ' ');
+        char pcbDisp[8];
+        snprintf(pcbDisp, 8, "PCb %s", sp ? sp + 1 : CFG_PCB_VERSION);
+        displayText(fwDisp, pcbDisp);
+        delay(5000);
+        displayText("      ", "      ");
         sendIdentAndState();
         identSentOnStart = true;
         pauseUntil = millis() + 200;
         continue;
       }
-      if (tokenUp == "EXIT") {
+      if (strcmp(tokenUp, "EXIT") == 0) {
         settingsEnabled = false;
         Serial.println("EXIT:OK ;");
         continue;
       }
-      if (tokenUp == "PCB") {
-        // Query PCB version from EEPROM
+      if (strcmp(tokenUp, "PCB") == 0) {
         Serial.print("PCB:");
-        // Extract major.minor from CFG_PCB_VERSION (e.g., "PCB 1.2" -> "v1.2")
-        String pcbVer = CFG_PCB_VERSION;
-        pcbVer.trim();
-        // Find the space and take everything after it
-        int spacePos = pcbVer.indexOf(' ');
-        if (spacePos >= 0 && spacePos < pcbVer.length() - 1) {
-          String digits = pcbVer.substring(spacePos + 1);
+        // Find space in CFG_PCB_VERSION
+        char* sp = strchr(CFG_PCB_VERSION, ' ');
+        if (sp && *(sp + 1)) {
           Serial.print("v");
-          Serial.print(digits);
+          Serial.print(sp + 1);
         } else {
-          Serial.print(pcbVer);
+          Serial.print(CFG_PCB_VERSION);
         }
         Serial.println(" ;");
         continue;
       }
-      if (tokenUp == "RESET") {
+      if (strcmp(tokenUp, "RESET") == 0) {
         Serial.println("RESET:OK ;");
         triggerSoftwareReset();
         continue;
       }
-      if (tokenUp == "REQ") {
+      if (strcmp(tokenUp, "REQ") == 0) {
         sendStatusImmediate();
         continue;
       }
-      if (tokenUp == "DIAG") {
-          if (bootState == BOOT_RUNNING) {
-            bootState = BOOT_DIAG_MENU;
-            diagStartTime = millis();
-            diagStage = 0;
-            menuInitialized = false;
-            Serial.println("DIAG:MENU_START;");
-          }
+      if (strcmp(tokenUp, "DIAG") == 0) {
+        if (bootState == BOOT_RUNNING) {
+          bootState = BOOT_DIAG_MENU;
+          diagStartTime = millis();
+          diagStage = 0;
+          menuInitialized = false;
+          Serial.println("DIAG:MENU_START;");
+        }
         continue;
       }
-      if (token.indexOf(':') >= 0) {
-        processIncomingLine(token + ";");
+      if (strchr(token, ':') != NULL) {
+        // Re-add semicolon terminator for processIncomingLine
+        char lineBuf[64];
+        snprintf(lineBuf, sizeof(lineBuf), "%s;", token);
+        processIncomingLine(lineBuf);
         continue;
       }
     }
@@ -1187,8 +1273,9 @@ void sendStatus() {
   unsigned long now = millis();
   if (!forceSendNext && (now - lastSendTs) < SEND_MIN_INTERVAL_MS) return;
   
-  Serial.print("IN1:"); Serial.print(bin8(inputState1)); Serial.print(";");
-  Serial.print("IN2:"); Serial.print(bin8(inputState2)); Serial.print(";");
+  char b8[9];
+  bin8(b8, inputState1); Serial.print("IN1:"); Serial.print(b8); Serial.print(";");
+  bin8(b8, inputState2); Serial.print("IN2:"); Serial.print(b8); Serial.print(";");
   
   // Send rotary encoder deltas (reset after sending)
   int rt1Delta = rotary1Counter - lastRotary1Counter;
@@ -1208,8 +1295,9 @@ void sendStatus() {
 
 void sendStatusImmediate() {
   // Force send immediately, bypassing throttle and always including rotary data
-  Serial.print("IN1:"); Serial.print(bin8(inputState1)); Serial.print(";");
-  Serial.print("IN2:"); Serial.print(bin8(inputState2)); Serial.print(";");
+  char b8[9];
+  bin8(b8, inputState1); Serial.print("IN1:"); Serial.print(b8); Serial.print(";");
+  bin8(b8, inputState2); Serial.print("IN2:"); Serial.print(b8); Serial.print(";");
   
   // Always send rotary encoder deltas
   int rt1Delta = rotary1Counter - lastRotary1Counter;
@@ -1257,21 +1345,21 @@ void runBootSequence() {
   else if (elapsed < 1950) displayText("--10--", "  init");
   // Stage 3: Show PCB version (left) and A/C ident (right) (1950-2450ms)
   else if (elapsed < 2450) {
-    // Left: full PCB version (trim/pad to 6 chars)
-    String leftDisplay = CFG_PCB_VERSION;
-    // If too long, try to remove a space to keep the numeric part
-    if (leftDisplay.length() > 6) {
-      int sp = leftDisplay.indexOf(' ');
-      if (sp >= 0) leftDisplay.remove(sp, 1);
+    char leftDisplay[8];
+    char rightDisplay[7];
+    // Left: full PCB version (trim/pad to 6 display positions, DP counts as extra char)
+    int li = 0;
+    for (int i = 0; CFG_PCB_VERSION[i] && li < 7; i++) {
+      if (CFG_PCB_VERSION[i] == ' ' && (li > 3)) continue; // skip space if already long
+      leftDisplay[li++] = CFG_PCB_VERSION[i];
     }
-    if (leftDisplay.length() > 6) leftDisplay = leftDisplay.substring(0, 6);
-    while (leftDisplay.length() < 6) leftDisplay += " ";
-
+    while (li < 7) leftDisplay[li++] = ' ';
+    leftDisplay[7] = 0;
     // Right: aircraft ident (trim/pad to 6 chars)
-    String rightDisplay = CFG_AIRCRAFT_REG;
-    if (rightDisplay.length() > 6) rightDisplay = rightDisplay.substring(0, 6);
-    while (rightDisplay.length() < 6) rightDisplay += " ";
-
+    int ri = 0;
+    for (int i = 0; CFG_AIRCRAFT_REG[i] && ri < 6; i++) rightDisplay[ri++] = CFG_AIRCRAFT_REG[i];
+    while (ri < 6) rightDisplay[ri++] = ' ';
+    rightDisplay[6] = 0;
     displayText(leftDisplay, rightDisplay);
   }
   // Stage 4: All off, sequence complete (2450ms+)
@@ -1293,9 +1381,9 @@ void updateOfflineDisplay() {
   // If host is offline
   if (!hostOnline) {
     // First time offline and display is blank - show message
-    if (!offlineMessageShown && displayLeft == "      " && displayRight == "      ") {
-      displayLeft = offlineMessage1;
-      displayRight = offlineMessage2;
+    if (!offlineMessageShown && strcmp(displayLeft, "      ") == 0 && strcmp(displayRight, "      ") == 0) {
+      strncpy(displayLeft, offlineMessage1, 6); displayLeft[6] = 0;
+      strncpy(displayRight, offlineMessage2, 6); displayRight[6] = 0;
       updateDisplay(DISP_LEFT, displayLeft);
       updateDisplay(DISP_RIGHT, displayRight);
       offlineDisplayStart = now;
@@ -1303,18 +1391,14 @@ void updateOfflineDisplay() {
     }
     // If message is shown and timeout expired, clear it and STAY cleared
     else if (offlineMessageShown && (now - offlineDisplayStart) >= OFFLINE_DISPLAY_DURATION_MS) {
-      // Clear display but DON'T reset offlineMessageShown - keep it true to prevent re-showing
-      // Only reactivateOfflineMessage() can show it again
-      if (displayLeft == offlineMessage1 && displayRight == offlineMessage2) {
-        displayLeft = "      ";
-        displayRight = "      ";
+      if (strcmp(displayLeft, offlineMessage1) == 0 && strcmp(displayRight, offlineMessage2) == 0) {
+        strncpy(displayLeft, "      ", 6); displayLeft[6] = 0;
+        strncpy(displayRight, "      ", 6); displayRight[6] = 0;
         updateDisplay(DISP_LEFT, displayLeft);
         updateDisplay(DISP_RIGHT, displayRight);
-        // NOTE: offlineMessageShown stays TRUE to prevent automatic re-show
       }
     }
   } else {
-    // Online - reset flags
     offlineMessageShown = false;
   }
 }
@@ -1322,9 +1406,9 @@ void updateOfflineDisplay() {
 // Reactivate offline message on button press
 void reactivateOfflineMessage() {
   if (!hostOnline && !offlineMessageShown) {
-    if (displayLeft == "      " && displayRight == "      ") {
-      displayLeft = offlineMessage1;
-      displayRight = offlineMessage2;
+    if (strcmp(displayLeft, "      ") == 0 && strcmp(displayRight, "      ") == 0) {
+      strncpy(displayLeft, offlineMessage1, 6); displayLeft[6] = 0;
+      strncpy(displayRight, offlineMessage2, 6); displayRight[6] = 0;
       updateDisplay(DISP_LEFT, displayLeft);
       updateDisplay(DISP_RIGHT, displayRight);
       offlineDisplayStart = millis();
@@ -1421,7 +1505,7 @@ void runButtonTest() {
     int rt2Delta = rotary2Counter - lastMenuRotary2;
     
     if (rt1Delta != 0 && (now - rotary1LastMenuEventTs) >= ROTARY_MENU_MIN_MS) {
-      String direction = (rt1Delta > 0) ? "INC   " : "dEC   ";
+      const char* direction = (rt1Delta > 0) ? "INC   " : "dEC   ";
       displayText("rot1  ", direction);
       delay(1000);  // Show for 1 second
       displayText("PrESS ", "bUtton");
@@ -1431,7 +1515,7 @@ void runButtonTest() {
     }
     
     if (rt2Delta != 0) {
-      String direction = (rt2Delta > 0) ? "INC   " : "dEC   ";
+      const char* direction = (rt2Delta > 0) ? "INC   " : "dEC   ";
       displayText("rot2  ", direction);
       delay(1000);  // Show for 1 second
       displayText("PrESS ", "bUtton");
@@ -1497,26 +1581,26 @@ void runShiftRegTest() {
     }
     
     // Format display: "IN1:00" "000000" or "IN2:00" "000000"
-    String leftDisplay, rightDisplay;
+    char leftDisplay[7], rightDisplay[7];
     
     if (showIN1) {
-      leftDisplay = "In1 ";
-      leftDisplay += ((currentIn1 >> 6) & 1) ? "1" : "0";
-      leftDisplay += ((currentIn1 >> 7) & 1) ? "1" : "0";
-      
-      rightDisplay = "";
-      for (int i = 5; i >= 0; i--) {
-        rightDisplay += ((currentIn1 >> i) & 1) ? "1" : "0";
+      leftDisplay[0] = 'I'; leftDisplay[1] = 'n'; leftDisplay[2] = '1'; leftDisplay[3] = ' ';
+      leftDisplay[4] = ((currentIn1 >> 6) & 1) ? '1' : '0';
+      leftDisplay[5] = ((currentIn1 >> 7) & 1) ? '1' : '0';
+      leftDisplay[6] = 0;
+      for (int i = 0; i < 6; i++) {
+        rightDisplay[i] = ((currentIn1 >> (5 - i)) & 1) ? '1' : '0';
       }
+      rightDisplay[6] = 0;
     } else {
-      leftDisplay = "In2 ";
-      leftDisplay += ((currentIn2 >> 6) & 1) ? "1" : "0";
-      leftDisplay += ((currentIn2 >> 7) & 1) ? "1" : "0";
-      
-      rightDisplay = "";
-      for (int i = 5; i >= 0; i--) {
-        rightDisplay += ((currentIn2 >> i) & 1) ? "1" : "0";
+      leftDisplay[0] = 'I'; leftDisplay[1] = 'n'; leftDisplay[2] = '2'; leftDisplay[3] = ' ';
+      leftDisplay[4] = ((currentIn2 >> 6) & 1) ? '1' : '0';
+      leftDisplay[5] = ((currentIn2 >> 7) & 1) ? '1' : '0';
+      leftDisplay[6] = 0;
+      for (int i = 0; i < 6; i++) {
+        rightDisplay[i] = ((currentIn2 >> (5 - i)) & 1) ? '1' : '0';
       }
+      rightDisplay[6] = 0;
     }
     
     displayText(leftDisplay, rightDisplay);
@@ -1740,22 +1824,21 @@ void runDiagMenu() {
     // Left display: PCB Version (e.g., "PCb 1.5")
     // Right display: Aircraft Ident (e.g., "D-AIDA")
     
-    String leftDisplay = CFG_PCB_VERSION;
-    // If too long, try to remove a single space to keep version digits
-    if (leftDisplay.length() > 6) {
-      int sp = leftDisplay.indexOf(' ');
-      if (sp >= 0) leftDisplay.remove(sp, 1);
+    char leftDisp[8], rightDisp[7];
+    // Left: PCB version, trim/pad to 7 chars (6 display positions + DP)
+    int li = 0;
+    for (int i = 0; CFG_PCB_VERSION[i] && li < 7; i++) {
+      if (CFG_PCB_VERSION[i] == ' ' && (li > 3)) continue;
+      leftDisp[li++] = CFG_PCB_VERSION[i];
     }
-    while (leftDisplay.length() < 6) leftDisplay += " ";
-    if (leftDisplay.length() > 6) leftDisplay = leftDisplay.substring(0, 6);
-    
-    // Build right display: Aircraft Ident
-    String rightDisplay = CFG_AIRCRAFT_REG;
-    while (rightDisplay.length() < 6) rightDisplay += " ";
-    if (rightDisplay.length() > 6) rightDisplay = rightDisplay.substring(0, 6);
-    
-    // Display both
-    displayText(leftDisplay, rightDisplay);
+    while (li < 7) leftDisp[li++] = ' ';
+    leftDisp[7] = 0;
+    // Right: aircraft ident
+    int ri = 0;
+    for (int i = 0; CFG_AIRCRAFT_REG[i] && ri < 6; i++) rightDisp[ri++] = CFG_AIRCRAFT_REG[i];
+    while (ri < 6) rightDisp[ri++] = ' ';
+    rightDisp[6] = 0;
+    displayText(leftDisp, rightDisp);
     
     // Exit on XFER
     bool xferPressed = ((lastInputState1 & BUTTON_XFER_MASK1) || (lastInputState2 & BUTTON_XFER_MASK2));
@@ -1910,22 +1993,25 @@ void runFullDiagSequence() {
     readShiftRegisters(in1, in2);
     
     // Display input states in binary on both displays
-    String leftBin = "";
-    String rightBin = "";
+    char leftBin[7], rightBin[7];
     
     // Show IN1 on left display (6 bits: bits 7-2)
-    for (int i = 7; i >= 2; i--) {
-      leftBin += (in1 & (1 << i)) ? "1" : "0";
+    for (int i = 0; i < 6; i++) {
+      leftBin[i] = (in1 & (1 << (7 - i))) ? '1' : '0';
     }
+    leftBin[6] = 0;
     
     // Show IN2 on right display (6 bits: bits 7-2)
-    for (int i = 7; i >= 2; i--) {
-      rightBin += (in2 & (1 << i)) ? "1" : "0";
+    for (int i = 0; i < 6; i++) {
+      rightBin[i] = (in2 & (1 << (7 - i))) ? '1' : '0';
     }
+    rightBin[6] = 0;
     
     displayText(leftBin, rightBin);
-    Serial.print("DIAG:IN1="); Serial.print(bin8(in1));
-    Serial.print(";IN2="); Serial.println(bin8(in2));
+    char b8a[9]; bin8(b8a, in1);
+    char b8b[9]; bin8(b8b, in2);
+    Serial.print("DIAG:IN1="); Serial.print(b8a);
+    Serial.print(";IN2="); Serial.println(b8b);
   }
   // Stage 4: LED driver test - walking LED pattern (15000-20000ms)
   else if (elapsed < 20000) {
@@ -1989,12 +2075,13 @@ void do_display_count_blocking(unsigned long dur) {
     unsigned long rel = millis() - t0;
     int digit = (rel / 500) % 10;
     int dpPos = (rel / 500) % 6;
-    String leftDisplay = "";
-    String rightDisplay = "";
+    char leftDisplay[13] = {0};
+    char rightDisplay[13] = {0};
+    int lp = 0, rp = 0;
     for (int i = 0; i < 6; i++) {
-      leftDisplay += String(digit);
-      rightDisplay += String(digit);
-      if (i == dpPos) { leftDisplay += "."; rightDisplay += "."; }
+      leftDisplay[lp++] = '0' + digit;
+      rightDisplay[rp++] = '0' + digit;
+      if (i == dpPos) { leftDisplay[lp++] = '.'; rightDisplay[rp++] = '.'; }
     }
     displayText(leftDisplay, rightDisplay);
     delay(80);
@@ -2052,14 +2139,15 @@ void do_display_count_step(unsigned long elapsed) {
   int digit = (elapsed / 500) % 10;
   int dpPos = (elapsed / 500) % 6;
   
-  String leftDisplay = "";
-  String rightDisplay = "";
+  char leftDisplay[13] = {0};
+  char rightDisplay[13] = {0};
+  int lp = 0, rp = 0;
   for (int i = 0; i < 6; i++) {
-    leftDisplay += String(digit);
-    rightDisplay += String(digit);
+    leftDisplay[lp++] = '0' + digit;
+    rightDisplay[rp++] = '0' + digit;
     if (i == dpPos) {
-      leftDisplay += ".";
-      rightDisplay += ".";
+      leftDisplay[lp++] = '.';
+      rightDisplay[rp++] = '.';
     }
   }
   displayText(leftDisplay, rightDisplay);
@@ -2142,26 +2230,24 @@ void loadHWInfo() {
     return;
   }
   
-  // Build Strings, trim trailing spaces/zeros
-  String regStr = "";
-  for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') regStr += regbuf[i];
-  if (regStr.length() > 0) CFG_AIRCRAFT_REG = regStr;
+  // Build char arrays, trim trailing spaces/zeros
+  int ri = 0;
+  for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') CFG_AIRCRAFT_REG[ri++] = regbuf[i];
+  if (ri > 0) CFG_AIRCRAFT_REG[ri] = 0; else CFG_AIRCRAFT_REG[0] = 0;
   
-  String pcbStr = "";
+  int pi = 0;
+  // Copy non-space chars
   for (int i = 0; i < 8; i++) {
     if (pcbbuf[i] == 0 || pcbbuf[i] == ' ') {
-      // Only trim trailing spaces
       int j = i;
       while (j < 8 && (pcbbuf[j] == 0 || pcbbuf[j] == ' ')) j++;
-      if (j >= 8) break;  // Rest is all spaces, stop here
+      if (j >= 8) break;
     }
-    pcbStr += pcbbuf[i];
+    CFG_PCB_VERSION[pi++] = pcbbuf[i];
   }
-  // Trim trailing spaces manually
-  while (pcbStr.length() > 0 && pcbStr.charAt(pcbStr.length()-1) == ' ') {
-    pcbStr = pcbStr.substring(0, pcbStr.length()-1);
-  }
-  if (pcbStr.length() > 0) CFG_PCB_VERSION = pcbStr;
+  // Trim trailing spaces
+  while (pi > 0 && CFG_PCB_VERSION[pi-1] == ' ') pi--;
+  if (pi > 0) CFG_PCB_VERSION[pi] = 0; else CFG_PCB_VERSION[0] = 0;
   refreshPCBVersionFlags();
   
   Serial.print("CFG:LOAD:REG="); Serial.print(CFG_AIRCRAFT_REG);
@@ -2171,14 +2257,16 @@ void loadHWInfo() {
 void saveHWInfo() {
   // Prepare buffers (pad with spaces)
   char regbuf[8];
+  int rlen = strlen(CFG_AIRCRAFT_REG);
   for (int i = 0; i < 8; i++) {
-    if (i < CFG_AIRCRAFT_REG.length()) regbuf[i] = CFG_AIRCRAFT_REG.charAt(i);
+    if (i < rlen) regbuf[i] = CFG_AIRCRAFT_REG[i];
     else regbuf[i] = ' ';
   }
   
   char pcbbuf[8];
+  int plen = strlen(CFG_PCB_VERSION);
   for (int i = 0; i < 8; i++) {
-    if (i < CFG_PCB_VERSION.length()) pcbbuf[i] = CFG_PCB_VERSION.charAt(i);
+    if (i < plen) pcbbuf[i] = CFG_PCB_VERSION[i];
     else pcbbuf[i] = ' ';
   }
   
