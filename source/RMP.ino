@@ -41,8 +41,8 @@ const int pwmBrightness = 3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RMP, v1.4 MAQ";
-const char  FW_VERSION[] = "1.4";
+const char* PANEL_IDENT = "RMP, v1.5 MAQ";
+const char  FW_VERSION[] = "1.5";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
 
@@ -318,6 +318,11 @@ enum BootState { BOOT_INIT, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
 BootState bootState = BOOT_INIT;
 unsigned long bootSequenceStart = 0;
 
+// Boot version message (non-blocking, auto-clears after 5s)
+bool bootMessageShown = false;
+unsigned long bootMessageStart = 0;
+const unsigned long BOOT_MESSAGE_DURATION_MS = 5000;
+
 // External state control (from host via STATE:00/01)
 bool hostOnline = false;  // false = offline, true = online
 const char offlineMessage1[] = "no FS ";
@@ -360,6 +365,8 @@ bool diagReturnToMenu = false;
 // DATA mode state (VHF3 LED triggers cross-cockpit data transfer display)
 bool dataMode = false;       // DATA mode active (VHF3 LED on)
 bool dataOnLeft = true;      // which display currently shows "dAtA"
+char lastDsp1Val[12] = "";   // cached last DSP1 value for restore after DATA swap
+char lastDsp2Val[12] = "";   // cached last DSP2 value
 
 // ============================================================================
 // RUNTIME BUFFERS / FLAGS
@@ -648,6 +655,7 @@ void readShiftRegisters(uint8_t &in1, uint8_t &in2) {
   byte raw2 = shiftIn(inputDataPin, inputClockPin, MSBFIRST);
   in1 = ~raw1;  // Invert if buttons are active-low
   in2 = ~raw2;
+  in2 ^= 0b00100000;  // Bit 5 (ON/OFF) inverted due to soldering error
   
   // Timing stabilization (like ACP)
   digitalWrite(inputLatchPin, LOW);
@@ -964,6 +972,15 @@ void processIncomingLine(const char* line) {
       }
       else if (strieq(kp, "LED2")) {
         desiredLedState = (desiredLedState & 0xFF00) | parseBin8(val);
+        // Immediate DATA mode update on VHF3 LED change
+        bool vhf3Now = (desiredLedState & 0x0004) != 0;
+        if (vhf3Now && !dataMode) {
+          dataMode = true; dataOnLeft = true;
+          strncpy(displayLeft, " dAtA ", 6); displayLeft[6] = 0;
+          updateDisplay(DISP_LEFT, displayLeft);
+        } else if (!vhf3Now && dataMode) {
+          dataMode = false;
+        }
         applyLEDOutputs();
       }
       else if (strieq(kp, "LED3")) {
@@ -981,30 +998,60 @@ void processIncomingLine(const char* line) {
       }
       else if (strieq(kp, "DSP1")) {
         int dspVal = atoi_s(val);
-        bool hasDot = (strchr(val, '.') != NULL);
+        // Always cache the raw value for DATA mode restore
+        strncpy(lastDsp1Val, val, 11); lastDsp1Val[11] = 0;
         // DATA mode: if this display is the "dAtA" side, ignore incoming DSP value
         if (dataMode && dataOnLeft) {
-          // Store underlying frequency? Not needed – just show "dAtA"
-          // (underlying value changes are handled by the other display / PC)
-        } else if (dspVal == -1 && !hasDot) {
-          // Display OFF → all segments blank
+          // dAtA blocks DSP1 – value is cached above for later restore
+        } else if (dspVal < 0 || val[0] == '-') {
+          // Any negative value → blank display
           for (int d = 0; d < 6; d++) lc.setRow(DISP_LEFT, d, 0);
           displayLeft[0] = 0;
-        } else if (!hasDot && dspVal >= 0 && dspVal <= 359) {
-          // Course mode only when NAV LED is on (LED2 bit 6)
-          if (desiredLedState & 0x0040) {
-            // Right-aligned: " C-xxx" on 6-digit display
+        } else if (desiredLedState & 0x4000) {
+          // --- ADF mode (LED1 bit 6) → kHz with one decimal, right-aligned ---
+          // > 999 → /100, < 100 → *10, else as-is; always append ".0"
+          int adfVal = dspVal;
+          if (adfVal > 999) adfVal /= 100;
+          else if (adfVal < 100) adfVal *= 10;
+          char adfBuf[8];
+          snprintf(adfBuf, 8, "%d.0", adfVal);
+          int elen = 0; for (const char* p = adfBuf; *p; p++) if (*p != '.') elen++;
+          int pad = 6 - elen;
+          if (pad > 0) { memset(displayLeft, ' ', pad); strncpy(displayLeft + pad, adfBuf, 12 - pad); }
+          else { strncpy(displayLeft, adfBuf, 12); }
+          displayLeft[11] = 0;
+          updateDisplay(DISP_LEFT, displayLeft);
+        } else if (desiredLedState & 0x0040) {
+          // --- NAV LED on → course mode active ---
+          // With decimal point: "0.000".."0.359" → course (×1000)
+          // Without decimal point: 0..359 → course, >=360 → frequency
+          bool isCourse = false;
+          int courseVal = 0;
+          char* dot = strchr(val, '.');
+          if (dot) {
+            *dot = 0;
+            int intPart = atoi_s(val);
+            int fracPart = atoi_s(dot + 1);
+            *dot = '.';
+            if (intPart == 0 && fracPart >= 0 && fracPart <= 359) {
+              isCourse = true;
+              courseVal = fracPart;
+            }
+          } else {
+            if (dspVal >= 0 && dspVal <= 359) {
+              isCourse = true;
+              courseVal = dspVal;
+            }
+          }
+
+          if (isCourse) {
             displayLeft[0] = ' ';
             displayLeft[1] = 'C'; displayLeft[2] = '-';
-            snprintf(displayLeft + 3, 4, "%03d", dspVal);
+            snprintf(displayLeft + 3, 4, "%03d", courseVal);
             displayLeft[6] = 0;
             updateDisplay(DISP_LEFT, displayLeft);
-          } else if (dspVal == 0) {
-            // Value 0 without NAV → display off
-            for (int d = 0; d < 6; d++) lc.setRow(DISP_LEFT, d, 0);
-            displayLeft[0] = 0;
           } else {
-            // Value 1-359 without NAV → treat as frequency (right-aligned)
+            // Not a course value → frequency
             int elen = 0; for (const char* p = val; *p; p++) if (*p != '.') elen++;
             int pad = 6 - elen;
             if (pad > 0) { memset(displayLeft, ' ', pad); strncpy(displayLeft + pad, val, 12 - pad); }
@@ -1012,16 +1059,12 @@ void processIncomingLine(const char* line) {
             displayLeft[11] = 0;
             updateDisplay(DISP_LEFT, displayLeft);
           }
-        } else if (dataMode && !dataOnLeft) {
-          // DATA mode active, dAtA is on right display – show DSP1 normally
-          int elen = 0; for (const char* p = val; *p; p++) if (*p != '.') elen++;
-          int pad = 6 - elen;
-          if (pad > 0) { memset(displayLeft, ' ', pad); strncpy(displayLeft + pad, val, 12 - pad); }
-          else { strncpy(displayLeft, val, 12); }
-          displayLeft[11] = 0;
-          updateDisplay(DISP_LEFT, displayLeft);
+        } else if (dspVal == 0) {
+          // NAV LED off + value 0 → blank
+          for (int d = 0; d < 6; d++) lc.setRow(DISP_LEFT, d, 0);
+          displayLeft[0] = 0;
         } else {
-          // Normal frequency display – right-aligned
+          // NAV LED off + non-zero → frequency
           int elen = 0; for (const char* p = val; *p; p++) if (*p != '.') elen++;
           int pad = 6 - elen;
           if (pad > 0) { memset(displayLeft, ' ', pad); strncpy(displayLeft + pad, val, 12 - pad); }
@@ -1032,22 +1075,53 @@ void processIncomingLine(const char* line) {
       }
       else if (strieq(kp, "DSP2")) {
         int dspVal = atoi_s(val);
-        bool hasDot = (strchr(val, '.') != NULL);
+        // Always cache the raw value for DATA mode restore
+        strncpy(lastDsp2Val, val, 11); lastDsp2Val[11] = 0;
         if (dataMode && !dataOnLeft) {
-          // DATA mode: dAtA is on right display, ignore incoming DSP2
-        } else if (dspVal == -1 && !hasDot) {
+          // dAtA blocks DSP2 – value is cached above for later restore
+        } else if (dspVal < 0 || val[0] == '-') {
           for (int d = 0; d < 6; d++) lc.setRow(DISP_RIGHT, d, 0);
           displayRight[0] = 0;
-        } else if (!hasDot && dspVal >= 0 && dspVal <= 359) {
-          if (desiredLedState & 0x0040) {
+        } else if (desiredLedState & 0x4000) {
+          // --- ADF mode (LED1 bit 6) → kHz with one decimal, right-aligned ---
+          int adfVal = dspVal;
+          if (adfVal > 999) adfVal /= 100;
+          else if (adfVal < 100) adfVal *= 10;
+          char adfBuf[8];
+          snprintf(adfBuf, 8, "%d.0", adfVal);
+          int elen = 0; for (const char* p = adfBuf; *p; p++) if (*p != '.') elen++;
+          int pad = 6 - elen;
+          if (pad > 0) { memset(displayRight, ' ', pad); strncpy(displayRight + pad, adfBuf, 12 - pad); }
+          else { strncpy(displayRight, adfBuf, 12); }
+          displayRight[11] = 0;
+          updateDisplay(DISP_RIGHT, displayRight);
+        } else if (desiredLedState & 0x0040) {
+          // --- NAV LED on → course mode active ---
+          bool isCourse = false;
+          int courseVal = 0;
+          char* dot = strchr(val, '.');
+          if (dot) {
+            *dot = 0;
+            int intPart = atoi_s(val);
+            int fracPart = atoi_s(dot + 1);
+            *dot = '.';
+            if (intPart == 0 && fracPart >= 0 && fracPart <= 359) {
+              isCourse = true;
+              courseVal = fracPart;
+            }
+          } else {
+            if (dspVal >= 0 && dspVal <= 359) {
+              isCourse = true;
+              courseVal = dspVal;
+            }
+          }
+
+          if (isCourse) {
             displayRight[0] = ' ';
             displayRight[1] = 'C'; displayRight[2] = '-';
-            snprintf(displayRight + 3, 4, "%03d", dspVal);
+            snprintf(displayRight + 3, 4, "%03d", courseVal);
             displayRight[6] = 0;
             updateDisplay(DISP_RIGHT, displayRight);
-          } else if (dspVal == 0) {
-            for (int d = 0; d < 6; d++) lc.setRow(DISP_RIGHT, d, 0);
-            displayRight[0] = 0;
           } else {
             int elen = 0; for (const char* p = val; *p; p++) if (*p != '.') elen++;
             int pad = 6 - elen;
@@ -1056,14 +1130,12 @@ void processIncomingLine(const char* line) {
             displayRight[11] = 0;
             updateDisplay(DISP_RIGHT, displayRight);
           }
-        } else if (dataMode && dataOnLeft) {
-          int elen = 0; for (const char* p = val; *p; p++) if (*p != '.') elen++;
-          int pad = 6 - elen;
-          if (pad > 0) { memset(displayRight, ' ', pad); strncpy(displayRight + pad, val, 12 - pad); }
-          else { strncpy(displayRight, val, 12); }
-          displayRight[11] = 0;
-          updateDisplay(DISP_RIGHT, displayRight);
+        } else if (dspVal == 0) {
+          // NAV LED off + value 0 → blank
+          for (int d = 0; d < 6; d++) lc.setRow(DISP_RIGHT, d, 0);
+          displayRight[0] = 0;
         } else {
+          // NAV LED off + non-zero → frequency
           int elen = 0; for (const char* p = val; *p; p++) if (*p != '.') elen++;
           int pad = 6 - elen;
           if (pad > 0) { memset(displayRight, ' ', pad); strncpy(displayRight + pad, val, 12 - pad); }
@@ -1269,7 +1341,7 @@ void processSerialTokensFromHost() {
       tokenUp[ti] = 0;
       
       if (strcmp(tokenUp, "VER") == 0 || strcmp(tokenUp, "VERSION") == 0 || strcmp(tokenUp, "IDENT") == 0) {
-        // Send ident immediately, then show versions on display
+        // Send ident immediately, then show versions on display (non-blocking)
         sendIdentAndState();
         identSentOnStart = true;
         char fwDisp[8];
@@ -1278,9 +1350,8 @@ void processSerialTokensFromHost() {
         char pcbDisp[8];
         snprintf(pcbDisp, 8, "PCb %s", sp ? sp + 1 : CFG_PCB_VERSION);
         displayText(fwDisp, pcbDisp);
-        delay(5000);
-        displayText("      ", "      ");
-        pauseUntil = millis() + 200;
+        bootMessageShown = true;
+        bootMessageStart = millis();
         continue;
       }
       if (strcmp(tokenUp, "EXIT") == 0) {
@@ -1711,7 +1782,6 @@ void runDiagMenu() {
       lastDebounceTs = now;
       lastInputState1 = inputState1;
       lastInputState2 = inputState2;
-      reactivateOfflineMessage();
     }
   }
 
@@ -2406,9 +2476,22 @@ void setup() {
   Serial.print("ms, DSP="); Serial.print(CFG_DISPLAY_REFRESH);
   Serial.print("ms, REG="); Serial.println(CFG_AIRCRAFT_REG);
   
-  // Start boot sequence
-  bootState = BOOT_INIT;
-  bootSequenceStart = millis();
+  // Show firmware and PCB version at boot (non-blocking, auto-clears after 5s in loop)
+  {
+    char fwDisp[8];
+    snprintf(fwDisp, 8, "FRM %s", FW_VERSION);
+    char* sp = strchr(CFG_PCB_VERSION, ' ');
+    char pcbDisp[8];
+    snprintf(pcbDisp, 8, "PCb %s", sp ? sp + 1 : CFG_PCB_VERSION);
+    displayText(fwDisp, pcbDisp);
+    bootMessageShown = true;
+    bootMessageStart = millis();
+  }
+  
+  // Go straight to running – no boot animation
+  bootState = BOOT_RUNNING;
+  forceSendNext = true;
+  maybeSendIdentStartup();
 }
 
 // ============================================================================
@@ -2416,12 +2499,6 @@ void setup() {
 // ============================================================================
 void loop() {
   unsigned long now = millis();
-  
-  // Handle boot sequence
-  if (bootState == BOOT_INIT) {
-    runBootSequence();
-    return;
-  }
   
   // Handle DIAG sequence
   if (bootState == BOOT_DIAG_MENU) {
@@ -2436,6 +2513,12 @@ void loop() {
   
   if (now < pauseUntil) return;
   
+  // Boot/version message timeout (also used by VER/IDENT) – non-blocking clear
+  if (bootMessageShown && (now - bootMessageStart) >= BOOT_MESSAGE_DURATION_MS) {
+    bootMessageShown = false;
+    displayText("      ", "      ");
+  }
+  
   processSerialTokensFromHost();
   
   // --- DATA mode: VHF3 LED edge detection & XFER swap ---
@@ -2444,7 +2527,7 @@ void loop() {
     // VHF3 LED just turned ON → enter DATA mode, dAtA on left
     dataMode = true;
     dataOnLeft = true;
-    strncpy(displayLeft, "dAtA  ", 6); displayLeft[6] = 0;
+    strncpy(displayLeft, " dAtA ", 6); displayLeft[6] = 0;
     updateDisplay(DISP_LEFT, displayLeft);
   } else if (!vhf3Led && dataMode) {
     // VHF3 LED turned OFF → exit DATA mode
@@ -2459,14 +2542,32 @@ void loop() {
   
   // --- DATA mode: XFER swap ---
   if (dataMode && (inputState1 & BUTTON_XFER_MASK1) && !(lastInputState1 & BUTTON_XFER_MASK1)) {
-    // XFER just pressed in DATA mode → swap dAtA side
+    // XFER just pressed in DATA mode → swap dAtA side, restore cached value on old side
     dataOnLeft = !dataOnLeft;
     if (dataOnLeft) {
-      strncpy(displayLeft, "dAtA  ", 6); displayLeft[6] = 0;
+      // dAtA moves to left, restore cached DSP2 on right
+      strncpy(displayLeft, " dAtA ", 6); displayLeft[6] = 0;
       updateDisplay(DISP_LEFT, displayLeft);
+      if (lastDsp2Val[0]) {
+        int elen = 0; for (const char* p = lastDsp2Val; *p; p++) if (*p != '.') elen++;
+        int pad = 6 - elen;
+        if (pad > 0) { memset(displayRight, ' ', pad); strncpy(displayRight + pad, lastDsp2Val, 12 - pad); }
+        else { strncpy(displayRight, lastDsp2Val, 12); }
+        displayRight[11] = 0;
+        updateDisplay(DISP_RIGHT, displayRight);
+      }
     } else {
-      strncpy(displayRight, "dAtA  ", 6); displayRight[6] = 0;
+      // dAtA moves to right, restore cached DSP1 on left
+      strncpy(displayRight, " dAtA ", 6); displayRight[6] = 0;
       updateDisplay(DISP_RIGHT, displayRight);
+      if (lastDsp1Val[0]) {
+        int elen = 0; for (const char* p = lastDsp1Val; *p; p++) if (*p != '.') elen++;
+        int pad = 6 - elen;
+        if (pad > 0) { memset(displayLeft, ' ', pad); strncpy(displayLeft + pad, lastDsp1Val, 12 - pad); }
+        else { strncpy(displayLeft, lastDsp1Val, 12); }
+        displayLeft[11] = 0;
+        updateDisplay(DISP_LEFT, displayLeft);
+      }
     }
   }
   
@@ -2478,13 +2579,6 @@ void loop() {
       lastInputState1 = inputState1;
       lastInputState2 = inputState2;
       inputChanged = true;
-      
-      // Reactivate offline message only if inputs actually changed from previous stable state
-      if (inputState1 != prevInputState1 || inputState2 != prevInputState2) {
-        reactivateOfflineMessage();
-        prevInputState1 = inputState1;
-        prevInputState2 = inputState2;
-      }
       
       sendStatusImmediate();
     }
@@ -2502,7 +2596,4 @@ void loop() {
     sendStatusImmediate();
   }
   // No periodic sending - only send on actual changes
-  
-  // Update offline display if needed (non-blocking)
-  updateOfflineDisplay();
 }

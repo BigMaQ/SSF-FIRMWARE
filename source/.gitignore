@@ -1,0 +1,4 @@
+# Exclude all subdirectories (Arduino IDE build folders etc.)
+*/
+# Keep .ino files at source root level
+!*.ino
