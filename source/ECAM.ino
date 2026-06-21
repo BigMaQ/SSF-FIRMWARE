@@ -3,6 +3,7 @@
 // Optimierte Serial-String-Verarbeitung (char-Puffer statt Arduino String)
 
 #include <EEPROM.h>
+#include <avr/wdt.h>
 
 // --- Pins (ECAM) ---
 const int ledLatchPin   = 2;
@@ -20,9 +21,20 @@ const int pot1Pin       = A9;
 const int pot2Pin       = A10;
 
 // --- Panel identification ---
-const char* PANEL_IDENT = "ECAM, v1.0 MAQ";
+const char* PANEL_IDENT = "ECAM, v1.1 MAQ";
+const char  FW_VERSION[] = "1.1";
+const char  PANEL_SN_PREFIX[] = "ECAM-";
 bool identSentOnStart   = false;
 unsigned long pauseUntil = 0;
+
+// Serial Number
+char CFG_SERIAL_NUMBER[10] = "";
+
+// Config variables
+char CFG_AIRCRAFT_REG[9] = "D-A320";
+char CFG_PCB_VERSION[9] = "PCB 1.0";
+bool settingsEnabled = false;
+const char SETTINGS_PIN[] = "0815";
 
 // --- Hardware revision ---
 const uint8_t HWREV_MIN = 1;
@@ -167,6 +179,62 @@ void loadHwRevisionFromEEPROM() {
   }
 }
 
+// --- EEPROM config v3 ---
+const int EEPROM_BASE_ADDR = 10;
+const uint16_t EEPROM_MAGIC = 0xA55A;
+const uint8_t EEPROM_FORMAT_VERSION = 3;
+
+void generateSerialNumber(char* out) {
+  randomSeed(analogRead(A9) + analogRead(A10) + micros());
+  const char hexChars[] = "0123456789ABCDEF";
+  for (int i = 0; i < 8; i++) { out[i] = hexChars[random(0, 16)]; }
+  out[8] = 0;
+}
+
+uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8, const char *sn9) {
+  uint16_t sum = version;
+  for (int i = 0; i < 8; i++) sum += (uint8_t)reg8[i];
+  for (int i = 0; i < 8; i++) sum += (uint8_t)pcb8[i];
+  for (int i = 0; i < 9; i++) sum += (uint8_t)sn9[i];
+  return (uint8_t)(sum & 0xFF);
+}
+
+void loadHWInfo() {
+  uint16_t magic = (uint16_t)EEPROM.read(EEPROM_BASE_ADDR) | ((uint16_t)EEPROM.read(EEPROM_BASE_ADDR+1) << 8);
+  if (magic != EEPROM_MAGIC) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); return; }
+  uint8_t ver = EEPROM.read(EEPROM_BASE_ADDR+2);
+  char regbuf[9]; char pcbbuf[9];
+  for(int i=0;i<8;i++){regbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+3+i);pcbbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+11+i);}
+  regbuf[8]=0;pcbbuf[8]=0;
+  if(ver<=2){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  if(ver!=EEPROM_FORMAT_VERSION){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  char snbuf[10];for(int i=0;i<9;i++)snbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+19+i);snbuf[9]=0;
+  if(EEPROM.read(EEPROM_BASE_ADDR+28)!=calcCfgChecksum(ver,regbuf,pcbbuf,snbuf)){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  int ri=0;for(int i=0;i<8;i++)if(regbuf[i]!=0&&regbuf[i]!=' ')CFG_AIRCRAFT_REG[ri++]=regbuf[i];CFG_AIRCRAFT_REG[ri]=0;
+  int pi=0;for(int i=0;i<8;i++)if(pcbbuf[i]!=0&&pcbbuf[i]!=' ')CFG_PCB_VERSION[pi++]=pcbbuf[i];CFG_PCB_VERSION[pi]=0;
+  int si=0;for(int i=0;i<8;i++)if(snbuf[i]!=0&&snbuf[i]!=' ')CFG_SERIAL_NUMBER[si++]=snbuf[i];CFG_SERIAL_NUMBER[si]=0;
+  if(si==0){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();}
+}
+
+void saveHWInfo() {
+  char regbuf[8];int rl=strlen(CFG_AIRCRAFT_REG);for(int i=0;i<8;i++)regbuf[i]=(i<rl)?CFG_AIRCRAFT_REG[i]:' ';
+  char pcbbuf[8];int pl=strlen(CFG_PCB_VERSION);for(int i=0;i<8;i++)pcbbuf[i]=(i<pl)?CFG_PCB_VERSION[i]:' ';
+  char snbuf[9];int sl=strlen(CFG_SERIAL_NUMBER);for(int i=0;i<8;i++)snbuf[i]=(i<sl)?CFG_SERIAL_NUMBER[i]:' ';snbuf[8]=0;
+  EEPROM.update(EEPROM_BASE_ADDR+0,(uint8_t)(EEPROM_MAGIC&0xFF));
+  EEPROM.update(EEPROM_BASE_ADDR+1,(uint8_t)((EEPROM_MAGIC>>8)&0xFF));
+  EEPROM.update(EEPROM_BASE_ADDR+2,EEPROM_FORMAT_VERSION);
+  for(int i=0;i<8;i++)EEPROM.update(EEPROM_BASE_ADDR+3+i,(uint8_t)regbuf[i]);
+  for(int i=0;i<8;i++)EEPROM.update(EEPROM_BASE_ADDR+11+i,(uint8_t)pcbbuf[i]);
+  for(int i=0;i<9;i++)EEPROM.update(EEPROM_BASE_ADDR+19+i,(uint8_t)snbuf[i]);
+  EEPROM.update(EEPROM_BASE_ADDR+28,calcCfgChecksum(EEPROM_FORMAT_VERSION,regbuf,pcbbuf,snbuf));
+}
+
+void triggerSoftwareReset() {
+  Serial.flush(); delay(50);
+  wdt_enable(WDTO_15MS);
+  while(true){}
+}
+
 // ============================================================================
 // Shift Register Input
 // ============================================================================
@@ -201,6 +269,9 @@ void readShiftRegisters(uint8_t &in1, uint8_t &in2, uint8_t &in3, uint8_t &in4) 
 
 void sendIdentAndState() {
   Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
+  if (CFG_SERIAL_NUMBER[0] != 0) {
+    Serial.print(", SN:"); Serial.print(PANEL_SN_PREFIX); Serial.print(CFG_SERIAL_NUMBER);
+  }
   Serial.print(";STATE:RUNNING;");
   Serial.print("HWREV:"); Serial.print(hwRevision); Serial.print(";");
   Serial.println();
@@ -263,7 +334,57 @@ void handleKeyValueToken(const char* key, const char* val) {
   else if (strcasecmp(key, "POT_DB") == 0) POT_DEADBAND = constrain(atoi(val), 0, 200);
 
   else if (strcasecmp(key, "DIAG") == 0) runDiag();
-}
+  // --- SET commands (char* based) ---
+  else if (strncasecmp(key, "SET ", 4) == 0) {
+    const char* setCmd = key + 4; while (*setCmd == ' ') setCmd++;
+    if (strncasecmp(setCmd, "ENA", 3) == 0) {
+      if (strcmp(val, SETTINGS_PIN) == 0) { settingsEnabled = true; Serial.println("SET ENA> ;"); }
+      else { Serial.println("SET ENA:FAIL ;"); }
+    }
+    else if (strncasecmp(setCmd, "FW", 2) == 0 && settingsEnabled) {
+      const char* dot = strchr(val, '.');
+      if (dot && dot > val && dot < val + strlen(val) - 1) {
+        int major = atoi(val); int minor = atoi(dot + 1);
+        if (major >= 1 && major <= 9 && minor >= 0 && minor <= 9) {
+          snprintf(CFG_PCB_VERSION, 9, "PCb %d.%d", major, minor);
+          Serial.println("SET FW:OK ;");
+        } else Serial.println("SET FW:RANGE ;");
+      } else Serial.println("SET FW:FORMAT ;");
+    }
+    else if (strncasecmp(setCmd, "ACID", 4) == 0 && settingsEnabled) {
+      int slen = strlen(val);
+      if (slen >= 3 && slen <= 8 && val[1] == '-' && isAlpha(val[0])) {
+        bool valid = true;
+        for (int i = 2; i < slen; i++) if (!isAlpha(val[i])) { valid = false; break; }
+        if (valid) { strncpy(CFG_AIRCRAFT_REG, val, 8); CFG_AIRCRAFT_REG[8] = 0; Serial.println("SET ACID:OK ;"); }
+        else Serial.println("SET ACID:FORMAT ;");
+      } else Serial.println("SET ACID:FORMAT ;");
+    }
+    else if (strncasecmp(setCmd, "SN", 2) == 0 && settingsEnabled) {
+      int slen = strlen(val);
+      if (slen == 8) {
+        bool valid = true;
+        for (int i = 0; i < 8 && valid; i++) {
+          char c = val[i];
+          if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) valid = false;
+        }
+        if (valid) {
+          for (int i = 0; i < 8; i++) CFG_SERIAL_NUMBER[i] = (val[i] >= 'a' && val[i] <= 'f') ? val[i] - 32 : val[i];
+          CFG_SERIAL_NUMBER[8] = 0;
+          Serial.print("SET SN:OK:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+        } else Serial.println("SET SN:FORMAT ;");
+      } else Serial.println("SET SN:FORMAT ;");
+    }
+    else if (strncasecmp(setCmd, "EXIT", 4) == 0) { settingsEnabled = false; Serial.println("SET EXIT:OK ;"); }
+    else if (strncasecmp(setCmd, "WRI", 3) == 0 && settingsEnabled) {
+      if (strcasecmp(val, "YES") == 0) { saveHWInfo(); settingsEnabled = false; Serial.println("SET WRI:OK ;"); triggerSoftwareReset(); }
+      else Serial.println("SET WRI:FORMAT ;");
+    }
+    else if (strncasecmp(setCmd, "WRITE", 5) == 0) {
+      if (settingsEnabled) { saveHWInfo(); settingsEnabled = false; Serial.println("WRITE:OK ;"); }
+      else Serial.println("WRITE:LOCKED ;");
+    }
+  }
 
 void handleSingleWordToken(const char* token) {
   if (strcasecmp(token, "VER") == 0 || strcasecmp(token, "VERSION") == 0) sendIdentAndState();
@@ -342,6 +463,7 @@ void sendStatus() {
 void setup() {
   Serial.begin(115200);
   loadHwRevisionFromEEPROM();
+  loadHWInfo();
 
   pinMode(ledLatchPin, OUTPUT);
   pinMode(ledClockPin, OUTPUT);

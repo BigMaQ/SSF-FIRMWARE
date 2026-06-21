@@ -41,10 +41,16 @@ const int pwmBrightness = 3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RMP, v1.5 MAQ";
-const char  FW_VERSION[] = "1.5";
+const char* PANEL_IDENT = "RMP, v1.6 MAQ";
+const char  FW_VERSION[] = "1.6";
+const char  PANEL_SN_PREFIX[] = "RMP-";   // SN-Präfix / SN prefix / คำนำหน้า SN
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
+
+// Serial Number – eindeutige Panel-ID / unique panel ID / รหัสแผงเฉพาะ
+// Wird beim ersten Start generiert und im EEPROM gespeichert
+// Generated on first boot and stored in EEPROM / สร้างเมื่อเริ่มต้นครั้งแรกและเก็บใน EEPROM
+char CFG_SERIAL_NUMBER[10] = "";  // 8 hex chars + null (prefix added on output / Präfix bei Ausgabe ergänzt)
 
 // ============================================================================
 // MAX7219 DISPLAY SETUP
@@ -146,13 +152,14 @@ bool CFG_PCB_IS_12 = false;            // Helper flag: true if PCB version is 1.
 // EEPROM storage layout for configuration
 const int EEPROM_BASE_ADDR = 0; // start address
 const uint16_t EEPROM_MAGIC = 0xA55A;
-const uint8_t EEPROM_FORMAT_VERSION = 2;  // Incremented for new layout
+const uint8_t EEPROM_FORMAT_VERSION = 3;  // v3: +serial_number (9 bytes)
 // Layout (offsets): 
 // 0-1: magic (uint16)
 // 2: version (uint8)
 // 3-10: aircraft_reg[8]
 // 11-18: pcb_version[8]
-// 19: checksum (uint8)
+// 19-27: serial_number[9] (8 hex chars + null) / Seriennummer / หมายเลขซีเรียล
+// 28: checksum (uint8)
 
 // Editing buffer for Settings->HW ID
 char editReg[9] = {0}; // 8 chars + null
@@ -841,6 +848,9 @@ void updateRotary2() {
 // ============================================================================
 void sendIdentAndState() {
   Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
+  if (CFG_SERIAL_NUMBER[0] != 0) {
+    Serial.print(", SN:"); Serial.print(PANEL_SN_PREFIX); Serial.print(CFG_SERIAL_NUMBER);
+  }
   Serial.print(";STATE:RUNNING;");
   Serial.print("REG:"); Serial.print(CFG_AIRCRAFT_REG); Serial.print(";");
   Serial.println();
@@ -932,14 +942,7 @@ void processIncomingLine(const char* line) {
             Serial.println("SET EXIT:OK ;");
           } else if (stripre(sc, "WRITE")) {
             if (settingsEnabled) {
-              uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, CFG_AIRCRAFT_REG, CFG_PCB_VERSION);
-              for (int i = 0; i < 8; i++) {
-                EEPROM.write(EEPROM_BASE_ADDR + 3 + i, (i < (int)strlen(CFG_AIRCRAFT_REG)) ? CFG_AIRCRAFT_REG[i] : 0);
-              }
-              for (int i = 0; i < 8; i++) {
-                EEPROM.write(EEPROM_BASE_ADDR + 11 + i, (i < (int)strlen(CFG_PCB_VERSION)) ? CFG_PCB_VERSION[i] : 0);
-              }
-              EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
+              saveHWInfo();
               settingsEnabled = false;
               displayText("SAUE ", "SAUE ");
               delay(1000);
@@ -1189,6 +1192,11 @@ void processIncomingLine(const char* line) {
             strncpy(CFG_AIRCRAFT_REG, cfgPtr + 4, 8);
             CFG_AIRCRAFT_REG[8] = 0;
           }
+          else if (stripre(cfgPtr, "SN:")) {
+            // SN:XXXXXXXX – 8-stelliger Hex-Wert / 8-digit hex value / ค่าเลขฐานสิบหก 8 หลัก
+            strncpy(CFG_SERIAL_NUMBER, cfgPtr + 3, 8);
+            CFG_SERIAL_NUMBER[8] = 0;
+          }
           
           if (semi) *semi = ';';  // Restore
           cfgPtr = semi ? semi + 1 : cfgPtr + strlen(cfgPtr);
@@ -1279,14 +1287,7 @@ void processIncomingLine(const char* line) {
         }
         else if (stripre(setCmd, "WRITE")) {
           if (settingsEnabled) {
-            uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, CFG_AIRCRAFT_REG, CFG_PCB_VERSION);
-            for (int i = 0; i < 8; i++) {
-              EEPROM.write(EEPROM_BASE_ADDR + 3 + i, (i < (int)strlen(CFG_AIRCRAFT_REG)) ? CFG_AIRCRAFT_REG[i] : 0);
-            }
-            for (int i = 0; i < 8; i++) {
-              EEPROM.write(EEPROM_BASE_ADDR + 11 + i, (i < (int)strlen(CFG_PCB_VERSION)) ? CFG_PCB_VERSION[i] : 0);
-            }
-            EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
+            saveHWInfo();
             settingsEnabled = false;
             displayText("SAUE ", "SAUE ");
             delay(1000);
@@ -1294,6 +1295,31 @@ void processIncomingLine(const char* line) {
             triggerSoftwareReset(false);
           } else {
             Serial.println("WRITE:LOCKED ;");
+          }
+        }
+        // SET SN:XXXXXXXX – Serial Number setzen / set serial number / ตั้งค่าหมายเลขซีเรียล
+        else if (stripre(setCmd, "SN") && settingsEnabled) {
+          char* snVal = val;
+          while (*snVal == ' ') snVal++;
+          int slen = strlen(snVal);
+          // Nur 8-stellige Hex-Werte akzeptieren / Only accept 8-digit hex / ยอมรับเฉพาะค่าเลขฐานสิบหก 8 หลัก
+          bool valid = (slen == 8);
+          for (int i = 0; i < slen && valid; i++) {
+            char c = snVal[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) valid = false;
+          }
+          if (valid) {
+            // To uppercase for storage / Großbuchstaben für Speicherung / ตัวพิมพ์ใหญ่สำหรับจัดเก็บ
+            for (int i = 0; i < 8; i++) {
+              CFG_SERIAL_NUMBER[i] = (snVal[i] >= 'a' && snVal[i] <= 'f') ? snVal[i] - 32 : snVal[i];
+            }
+            CFG_SERIAL_NUMBER[8] = 0;
+            char snDisp[7];
+            snprintf(snDisp, 7, "%s", CFG_SERIAL_NUMBER);
+            displayText("Sn SEt", snDisp);
+            Serial.print("SET SN:OK:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+          } else {
+            Serial.println("SET SN:FORMAT ;");
           }
         }
       }
@@ -2328,69 +2354,151 @@ void checkDiagCombo() {
 // ============================================================================
 // SETUP
 // ============================================================================
+// ---------------------- Serial Number helpers ---------------------------------
+// Generiert 8 zufällige Hex-Zeichen / Generates 8 random hex chars / สร้างอักขระฐานสิบหกแบบสุ่ม 8 ตัว
+void generateSerialNumber(char* out) {
+  // Seed from floating analog pin + micros() for better randomness
+  // Seed von unbelegtem Analog-Pin + micros() für bessere Zufälligkeit
+  // ใช้ขาอนาล็อกที่ไม่ได้ต่อ + micros() เพื่อความสุ่มที่ดีขึ้น
+  randomSeed(analogRead(A0) + analogRead(A1) + analogRead(A2) + analogRead(A3) + micros());
+  const char hexChars[] = "0123456789ABCDEF";
+  for (int i = 0; i < 8; i++) {
+    out[i] = hexChars[random(0, 16)];
+  }
+  out[8] = 0;
+}
+
 // ---------------------- EEPROM helpers -------------------------------------
-uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8) {
+uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8, const char *sn9) {
   uint16_t sum = version;
   for (int i = 0; i < 8; i++) sum += (uint8_t)reg8[i];
   for (int i = 0; i < 8; i++) sum += (uint8_t)pcb8[i];
+  for (int i = 0; i < 9; i++) sum += (uint8_t)sn9[i];  // SN: 8 chars + null
   return (uint8_t)(sum & 0xFF);
 }
 
 void loadHWInfo() {
+  // Lese Magic und Version / Read magic and version / อ่าน magic และ version
   uint16_t magic = (uint16_t)EEPROM.read(EEPROM_BASE_ADDR) | ((uint16_t)EEPROM.read(EEPROM_BASE_ADDR+1) << 8);
+  
+  // --- Fall 1: Kein Magic → EEPROM leer, alles neu anlegen / No magic → empty EEPROM / ไม่มี magic → EEPROM ว่าง ---
   if (magic != EEPROM_MAGIC) {
     Serial.println("CFG:EEPROM:MAGIC_MISSING;");
+    generateSerialNumber(CFG_SERIAL_NUMBER);
+    saveHWInfo();  // SOFORT ins EEPROM schreiben / write to EEPROM immediately / เขียนลง EEPROM ทันที
+    Serial.print("CFG:SN:NEW:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
     return;
   }
+  
   uint8_t ver = EEPROM.read(EEPROM_BASE_ADDR+2);
-  if (ver != EEPROM_FORMAT_VERSION) {
-    Serial.print("CFG:EEPROM:VERSION_MISMATCH:"); Serial.println(ver);
-    return;
-  }
   
-  // Read aircraft registration
+  // --- Gemeinsam: REG + PCB aus EEPROM lesen (Offset ist für v1/v2/v3 gleich) ---
+  // --- Common: read REG + PCB from EEPROM (same offset for v1/v2/v3) ---
   char regbuf[9];
-  for (int i = 0; i < 8; i++) regbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+3+i);
-  regbuf[8] = 0;
-  
-  // Read PCB version
   char pcbbuf[9];
+  for (int i = 0; i < 8; i++) regbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+3+i);
   for (int i = 0; i < 8; i++) pcbbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+11+i);
+  regbuf[8] = 0;
   pcbbuf[8] = 0;
   
-  uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+19);
-  uint8_t cs = calcCfgChecksum(ver, regbuf, pcbbuf);
-  if (cs != storedCs) {
-    Serial.println("CFG:EEPROM:CRC_FAIL;");
+  // --- Fall 2: v1/v2 EEPROM → kein SN-Feld → upgraden / v1/v2 EEPROM → no SN field → upgrade ---
+  if (ver <= 2) {
+    uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+19);
+    uint8_t cs = calcCfgChecksum(ver, regbuf, pcbbuf, "         ");  // leere SN für v1/v2 / empty SN
+    if (cs != storedCs) {
+      // CRC fehlerhaft → trotzdem upgraden mit neuer SN / CRC corrupt → upgrade with new SN
+      Serial.println("CFG:EEPROM:CRC_FAIL_v1v2;");
+    }
+    // REG + PCB aus v1/v2 übernehmen (falls CRC ok) oder Defaults behalten
+    if (cs == storedCs) {
+      int ri = 0;
+      for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') CFG_AIRCRAFT_REG[ri++] = regbuf[i];
+      if (ri > 0) CFG_AIRCRAFT_REG[ri] = 0;
+      int pi = 0;
+      for (int i = 0; i < 8; i++) {
+        if (pcbbuf[i] == 0 || pcbbuf[i] == ' ') { int j = i; while (j < 8 && (pcbbuf[j] == 0 || pcbbuf[j] == ' ')) j++; if (j >= 8) break; }
+        CFG_PCB_VERSION[pi++] = pcbbuf[i];
+      }
+      while (pi > 0 && CFG_PCB_VERSION[pi-1] == ' ') pi--;
+      if (pi > 0) CFG_PCB_VERSION[pi] = 0;
+      refreshPCBVersionFlags();
+    }
+    // Neue SN generieren UND als v3 speichern / Generate new SN AND save as v3
+    generateSerialNumber(CFG_SERIAL_NUMBER);
+    saveHWInfo();  // Upgrade auf v3 + SN persistieren / upgrade to v3 + persist SN
+    Serial.print("CFG:SN:UPGRADE_v1v2:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+    Serial.print("CFG:LOAD:REG="); Serial.print(CFG_AIRCRAFT_REG);
+    Serial.print(";PCB="); Serial.print(CFG_PCB_VERSION);
+    Serial.print(";SN="); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
     return;
   }
   
-  // Build char arrays, trim trailing spaces/zeros
+  // --- Fall 3: v3+, aber andere Version als erwartet ---
+  if (ver != EEPROM_FORMAT_VERSION) {
+    Serial.print("CFG:EEPROM:VERSION_MISMATCH:"); Serial.print(ver);
+    Serial.print("!="); Serial.println(EEPROM_FORMAT_VERSION);
+    // Trotzdem versuchen, REG + PCB zu laden, dann neue SN speichern
+    generateSerialNumber(CFG_SERIAL_NUMBER);
+    saveHWInfo();
+    Serial.print("CFG:SN:NEW_VER_MISMATCH:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+    return;
+  }
+  
+  // --- Fall 4: v3 mit korrekter Version → SN-Feld lesen ---
+  char snbuf[10];
+  for (int i = 0; i < 9; i++) snbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+19+i);
+  snbuf[9] = 0;
+  
+  uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+28);
+  uint8_t cs = calcCfgChecksum(ver, regbuf, pcbbuf, snbuf);
+  
+  if (cs != storedCs) {
+    // CRC-Fehler → REG/PCB mit Defaults, neue SN / CRC error → defaults + new SN
+    Serial.println("CFG:EEPROM:CRC_FAIL_v3;");
+    generateSerialNumber(CFG_SERIAL_NUMBER);
+    saveHWInfo();
+    Serial.print("CFG:SN:NEW_CRC:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+    return;
+  }
+  
+  // --- CRC OK → REG, PCB und SN laden ---
   int ri = 0;
   for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') CFG_AIRCRAFT_REG[ri++] = regbuf[i];
-  if (ri > 0) CFG_AIRCRAFT_REG[ri] = 0; else CFG_AIRCRAFT_REG[0] = 0;
+  if (ri > 0) CFG_AIRCRAFT_REG[ri] = 0;
   
   int pi = 0;
-  // Copy non-space chars
   for (int i = 0; i < 8; i++) {
-    if (pcbbuf[i] == 0 || pcbbuf[i] == ' ') {
-      int j = i;
-      while (j < 8 && (pcbbuf[j] == 0 || pcbbuf[j] == ' ')) j++;
-      if (j >= 8) break;
-    }
+    if (pcbbuf[i] == 0 || pcbbuf[i] == ' ') { int j = i; while (j < 8 && (pcbbuf[j] == 0 || pcbbuf[j] == ' ')) j++; if (j >= 8) break; }
     CFG_PCB_VERSION[pi++] = pcbbuf[i];
   }
-  // Trim trailing spaces
   while (pi > 0 && CFG_PCB_VERSION[pi-1] == ' ') pi--;
-  if (pi > 0) CFG_PCB_VERSION[pi] = 0; else CFG_PCB_VERSION[0] = 0;
+  if (pi > 0) CFG_PCB_VERSION[pi] = 0;
   refreshPCBVersionFlags();
   
+  // SN laden / load SN
+  int si = 0;
+  for (int i = 0; i < 8; i++) if (snbuf[i] != 0 && snbuf[i] != ' ') CFG_SERIAL_NUMBER[si++] = snbuf[i];
+  CFG_SERIAL_NUMBER[si] = 0;
+  
+  if (si == 0) {
+    // SN-Feld leer (sollte nicht vorkommen) → neu generieren + speichern
+    // Empty SN field (should not happen) → generate + save
+    generateSerialNumber(CFG_SERIAL_NUMBER);
+    saveHWInfo();
+    Serial.print("CFG:SN:NEW_EMPTY:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+  } else {
+    // SN erfolgreich aus EEPROM geladen – KEIN saveHWInfo() nötig!
+    // SN loaded from EEPROM – NO saveHWInfo() needed!
+    Serial.print("CFG:SN:LOADED:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+  }
+  
   Serial.print("CFG:LOAD:REG="); Serial.print(CFG_AIRCRAFT_REG);
-  Serial.print(";PCB="); Serial.println(CFG_PCB_VERSION);
+  Serial.print(";PCB="); Serial.print(CFG_PCB_VERSION);
+  Serial.print(";SN="); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
 }
 
 void saveHWInfo() {
-  // Prepare buffers (pad with spaces)
+  // Prepare buffers (pad with spaces) / Puffer vorbereiten (mit Leerzeichen auffüllen) / เตรียมบัฟเฟอร์ (เติมด้วยช่องว่าง)
   char regbuf[8];
   int rlen = strlen(CFG_AIRCRAFT_REG);
   for (int i = 0; i < 8; i++) {
@@ -2405,6 +2513,14 @@ void saveHWInfo() {
     else pcbbuf[i] = ' ';
   }
   
+  char snbuf[9];
+  int slen = strlen(CFG_SERIAL_NUMBER);
+  for (int i = 0; i < 8; i++) {
+    if (i < slen) snbuf[i] = CFG_SERIAL_NUMBER[i];
+    else snbuf[i] = ' ';
+  }
+  snbuf[8] = 0;  // null terminator for checksum consistency
+  
   uint16_t magic = EEPROM_MAGIC;
   EEPROM.update(EEPROM_BASE_ADDR + 0, (uint8_t)(magic & 0xFF));
   EEPROM.update(EEPROM_BASE_ADDR + 1, (uint8_t)((magic >> 8) & 0xFF));
@@ -2412,12 +2528,14 @@ void saveHWInfo() {
   
   for (int i = 0; i < 8; i++) EEPROM.update(EEPROM_BASE_ADDR + 3 + i, (uint8_t)regbuf[i]);
   for (int i = 0; i < 8; i++) EEPROM.update(EEPROM_BASE_ADDR + 11 + i, (uint8_t)pcbbuf[i]);
+  for (int i = 0; i < 9; i++) EEPROM.update(EEPROM_BASE_ADDR + 19 + i, (uint8_t)snbuf[i]);
   
-  uint8_t cs = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf, pcbbuf);
-  EEPROM.update(EEPROM_BASE_ADDR + 19, cs);
+  uint8_t cs = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf, pcbbuf, snbuf);
+  EEPROM.update(EEPROM_BASE_ADDR + 28, cs);
   
   Serial.print("CFG:SAVED:REG="); Serial.print(CFG_AIRCRAFT_REG);
-  Serial.print(";PCB="); Serial.println(CFG_PCB_VERSION);
+  Serial.print(";PCB="); Serial.print(CFG_PCB_VERSION);
+  Serial.print(";SN="); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
 }
 
 void setup() {
@@ -2474,7 +2592,8 @@ void setup() {
   Serial.print("SETUP:Debounce="); Serial.print(CFG_BUTTON_DEBOUNCE);
   Serial.print("ms, LED="); Serial.print(CFG_LED_REFRESH);
   Serial.print("ms, DSP="); Serial.print(CFG_DISPLAY_REFRESH);
-  Serial.print("ms, REG="); Serial.println(CFG_AIRCRAFT_REG);
+  Serial.print("ms, REG="); Serial.print(CFG_AIRCRAFT_REG);
+  Serial.print(", SN="); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
   
   // Show firmware and PCB version at boot (non-blocking, auto-clears after 5s in loop)
   {

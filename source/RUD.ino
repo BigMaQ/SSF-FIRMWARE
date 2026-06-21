@@ -33,8 +33,13 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.0 MAQ";
+const char* PANEL_IDENT = "RUD, v1.1 MAQ";
+const char  FW_VERSION[] = "1.1";
+const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
+
+// Serial Number – eindeutige Panel-ID
+char CFG_SERIAL_NUMBER[10] = "";  // 8 hex chars + null
 
 // ============================================================================
 // DIAG MODE STATE
@@ -53,12 +58,22 @@ const String SETTINGS_PIN = "0815";
 
 const int EEPROM_BASE_ADDR = 0;
 const uint16_t EEPROM_MAGIC = 0xA55A;
-const uint8_t EEPROM_FORMAT_VERSION = 2; // layout: magic(2), ver(1), reg(8), pcb(8), crc(1)
+const uint8_t EEPROM_FORMAT_VERSION = 3; // v3: +serial_number (9 bytes)
+// Layout: magic(2), ver(1), reg(8), pcb(8), sn(9), crc(1) = 29 bytes
 
-uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8) {
+// Generiert 8 zufällige Hex-Zeichen
+void generateSerialNumber(char* out) {
+  randomSeed(analogRead(A0) + analogRead(A1) + analogRead(A2) + analogRead(A3) + micros());
+  const char hexChars[] = "0123456789ABCDEF";
+  for (int i = 0; i < 8; i++) { out[i] = hexChars[random(0, 16)]; }
+  out[8] = 0;
+}
+
+uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8, const char *sn9) {
   uint16_t sum = version;
   for (int i = 0; i < 8; i++) sum += (uint8_t)reg8[i];
   for (int i = 0; i < 8; i++) sum += (uint8_t)pcb8[i];
+  for (int i = 0; i < 9; i++) sum += (uint8_t)sn9[i];
   return (uint8_t)(sum & 0xFF);
 }
 
@@ -72,41 +87,60 @@ void triggerSoftwareReset() {
 
 void loadHWInfo() {
   uint16_t magic = (uint16_t)EEPROM.read(EEPROM_BASE_ADDR) | ((uint16_t)EEPROM.read(EEPROM_BASE_ADDR+1) << 8);
-  if (magic != EEPROM_MAGIC) return;
+  if (magic != EEPROM_MAGIC) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); return; }
   uint8_t ver = EEPROM.read(EEPROM_BASE_ADDR+2);
-  if (ver != EEPROM_FORMAT_VERSION) return;
-  char regbuf[9];
-  for (int i = 0; i < 8; i++) regbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+3+i);
-  regbuf[8] = 0;
-  char pcbbuf[9];
-  for (int i = 0; i < 8; i++) pcbbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+11+i);
-  pcbbuf[8] = 0;
-  uint8_t stored = EEPROM.read(EEPROM_BASE_ADDR+19);
-  if (stored != calcCfgChecksum(ver, regbuf, pcbbuf)) return;
-  String regStr = "";
-  for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') regStr += regbuf[i];
+  char regbuf[9]; char pcbbuf[9];
+  for (int i = 0; i < 8; i++) { regbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+3+i); pcbbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+11+i); }
+  regbuf[8] = 0; pcbbuf[8] = 0;
+  
+  if (ver <= 2) {
+    uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+19);
+    uint8_t cs = calcCfgChecksum(ver, regbuf, pcbbuf, "         ");
+    if (cs == storedCs) {
+      String regStr = ""; for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') regStr += regbuf[i];
+      if (regStr.length() > 0) CFG_AIRCRAFT_REG = regStr;
+      String pcbStr = ""; for (int i = 0; i < 8; i++) pcbStr += (pcbbuf[i] ? pcbbuf[i] : ' ');
+      while (pcbStr.length() > 0 && pcbStr.charAt(pcbStr.length()-1) == ' ') pcbStr.remove(pcbStr.length()-1);
+      if (pcbStr.length() > 0) CFG_PCB_VERSION = pcbStr;
+    }
+    generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo();
+    Serial.print("CFG:SN:UPGRADE:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+    return;
+  }
+  if (ver != EEPROM_FORMAT_VERSION) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); return; }
+  
+  char snbuf[10]; for (int i = 0; i < 9; i++) snbuf[i] = (char)EEPROM.read(EEPROM_BASE_ADDR+19+i); snbuf[9] = 0;
+  uint8_t storedCs = EEPROM.read(EEPROM_BASE_ADDR+28);
+  if (storedCs != calcCfgChecksum(ver, regbuf, pcbbuf, snbuf)) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); return; }
+  
+  String regStr = ""; for (int i = 0; i < 8; i++) if (regbuf[i] != 0 && regbuf[i] != ' ') regStr += regbuf[i];
   if (regStr.length() > 0) CFG_AIRCRAFT_REG = regStr;
-  String pcbStr = "";
-  for (int i = 0; i < 8; i++) pcbStr += (pcbbuf[i] ? pcbbuf[i] : ' ');
+  String pcbStr = ""; for (int i = 0; i < 8; i++) pcbStr += (pcbbuf[i] ? pcbbuf[i] : ' ');
   while (pcbStr.length() > 0 && pcbStr.charAt(pcbStr.length()-1) == ' ') pcbStr.remove(pcbStr.length()-1);
   if (pcbStr.length() > 0) CFG_PCB_VERSION = pcbStr;
+  
+  int si = 0; for (int i = 0; i < 8; i++) if (snbuf[i] != 0 && snbuf[i] != ' ') CFG_SERIAL_NUMBER[si++] = snbuf[i];
+  CFG_SERIAL_NUMBER[si] = 0;
+  if (si == 0) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); }
+  else { Serial.print("CFG:SN:LOADED:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER); }
 }
 
 void saveHWInfo() {
-  char regbuf[8];
-  for (int i = 0; i < 8; i++) regbuf[i] = (i < CFG_AIRCRAFT_REG.length()) ? CFG_AIRCRAFT_REG.charAt(i) : ' ';
-  char pcbbuf[8];
-  for (int i = 0; i < 8; i++) pcbbuf[i] = (i < CFG_PCB_VERSION.length()) ? CFG_PCB_VERSION.charAt(i) : ' ';
+  char regbuf[8]; for (int i = 0; i < 8; i++) regbuf[i] = (i < CFG_AIRCRAFT_REG.length()) ? CFG_AIRCRAFT_REG.charAt(i) : ' ';
+  char pcbbuf[8]; for (int i = 0; i < 8; i++) pcbbuf[i] = (i < CFG_PCB_VERSION.length()) ? CFG_PCB_VERSION.charAt(i) : ' ';
+  char snbuf[9]; int slen = strlen(CFG_SERIAL_NUMBER);
+  for (int i = 0; i < 8; i++) snbuf[i] = (i < slen) ? CFG_SERIAL_NUMBER[i] : ' ';
+  snbuf[8] = 0;
+  
   uint16_t magic = EEPROM_MAGIC;
   EEPROM.update(EEPROM_BASE_ADDR + 0, (uint8_t)(magic & 0xFF));
   EEPROM.update(EEPROM_BASE_ADDR + 1, (uint8_t)((magic >> 8) & 0xFF));
   EEPROM.update(EEPROM_BASE_ADDR + 2, EEPROM_FORMAT_VERSION);
   for (int i = 0; i < 8; i++) EEPROM.update(EEPROM_BASE_ADDR + 3 + i, (uint8_t)regbuf[i]);
   for (int i = 0; i < 8; i++) EEPROM.update(EEPROM_BASE_ADDR + 11 + i, (uint8_t)pcbbuf[i]);
-  uint8_t cs = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf, pcbbuf);
-  EEPROM.update(EEPROM_BASE_ADDR + 19, cs);
-  Serial.print("CFG:SAVED:REG="); Serial.print(CFG_AIRCRAFT_REG);
-  Serial.print(";PCB="); Serial.println(CFG_PCB_VERSION);
+  for (int i = 0; i < 9; i++) EEPROM.update(EEPROM_BASE_ADDR + 19 + i, (uint8_t)snbuf[i]);
+  uint8_t cs = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf, pcbbuf, snbuf);
+  EEPROM.update(EEPROM_BASE_ADDR + 28, cs);
 }
 
 // ============================================================================
@@ -287,6 +321,9 @@ int lastPotValue = 0;
 
 void sendIdentAndState() {
   Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
+  if (CFG_SERIAL_NUMBER[0] != 0) {
+    Serial.print(", SN:"); Serial.print(PANEL_SN_PREFIX); Serial.print(CFG_SERIAL_NUMBER);
+  }
   Serial.print(";STATE:RUNNING;REG:"); Serial.print(CFG_AIRCRAFT_REG); Serial.print(";");
   Serial.println();
 }
@@ -422,14 +459,25 @@ void processIncomingLine(const String &line) {
       }
       else if (setCmd.startsWith("WRITE")) {
         if (settingsEnabled) {
-          char regbuf[8]; for (int i = 0; i < 8; i++) regbuf[i] = (i < CFG_AIRCRAFT_REG.length()) ? CFG_AIRCRAFT_REG.charAt(i) : ' ';
-          char pcbbuf[8]; for (int i = 0; i < 8; i++) pcbbuf[i] = (i < CFG_PCB_VERSION.length()) ? CFG_PCB_VERSION.charAt(i) : ' ';
-          uint8_t checksum = calcCfgChecksum(EEPROM_FORMAT_VERSION, regbuf, pcbbuf);
-          for (int i = 0; i < 8; i++) EEPROM.write(EEPROM_BASE_ADDR + 3 + i, regbuf[i]);
-          for (int i = 0; i < 8; i++) EEPROM.write(EEPROM_BASE_ADDR + 11 + i, pcbbuf[i]);
-          EEPROM.write(EEPROM_BASE_ADDR + 19, checksum);
+          saveHWInfo();
           settingsEnabled = false; Serial.println("WRITE:OK ;");
         } else Serial.println("WRITE:LOCKED ;");
+      }
+      else if (setCmd.startsWith("SN:") && settingsEnabled) {
+        String snVal = setCmd.substring(3); snVal.trim();
+        if (snVal.length() == 8) {
+          bool valid = true;
+          for (int i = 0; i < 8 && valid; i++) {
+            char c = snVal.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) valid = false;
+          }
+          if (valid) {
+            snVal.toUpperCase();
+            for (int i = 0; i < 8; i++) CFG_SERIAL_NUMBER[i] = snVal.charAt(i);
+            CFG_SERIAL_NUMBER[8] = 0;
+            Serial.print("SET SN:OK:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+          } else Serial.println("SET SN:FORMAT ;");
+        } else Serial.println("SET SN:FORMAT ;");
       }
     }
   }

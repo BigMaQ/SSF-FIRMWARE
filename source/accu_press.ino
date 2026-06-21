@@ -5,6 +5,7 @@
 // PWM brightness on PIN_BRIGHTNESS = 9 (A9 on Pro Micro)
 
 #include <Servo.h>
+#include <EEPROM.h>
 #if defined(__AVR__)
   #include <avr/wdt.h>
 #endif
@@ -37,7 +38,14 @@ volatile uint32_t ledChangeCounter = 0;    // increments on user LED changes
 volatile uint32_t brightChangeCounter = 0; // increments on user brightness changes
 
 const unsigned long SERIAL_BAUD = 115200;
-const char IDENT_STRING[] = "IDENT: MIP HYD-PRS, v1.0 MAQ";
+const char IDENT_STRING[] = "IDENT: MIP HYD-PRS, v1.1 MAQ";
+const char FW_VERSION[] = "1.1";
+const char PANEL_SN_PREFIX[] = "HYDPRS-";
+char CFG_SERIAL_NUMBER[10] = "";
+char CFG_AIRCRAFT_REG[9] = "D-A320";
+char CFG_PCB_VERSION[9] = "PCB 1.0";
+bool settingsEnabled = false;
+const char SETTINGS_PIN[] = "0815";
 
 bool RUN_STARTUP_TEST = true;
 const unsigned long STARTUP_TEST_DELAY_MS = 400;
@@ -326,6 +334,56 @@ void runDiagRoutine() {
   Serial.println("DIAG finished.");
 }
 
+// ==== EEPROM config v3 ====
+const int EEPROM_BASE_ADDR = 0;
+const uint16_t EEPROM_MAGIC = 0xA55A;
+const uint8_t EEPROM_FORMAT_VERSION = 3;
+
+void generateSerialNumber(char* out) {
+  randomSeed(analogRead(A0) + micros());
+  const char hexChars[] = "0123456789ABCDEF";
+  for (int i = 0; i < 8; i++) { out[i] = hexChars[random(0, 16)]; }
+  out[8] = 0;
+}
+
+uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8, const char *sn9) {
+  uint16_t sum = version;
+  for (int i = 0; i < 8; i++) sum += (uint8_t)reg8[i];
+  for (int i = 0; i < 8; i++) sum += (uint8_t)pcb8[i];
+  for (int i = 0; i < 9; i++) sum += (uint8_t)sn9[i];
+  return (uint8_t)(sum & 0xFF);
+}
+
+void loadHWInfo() {
+  uint16_t magic = (uint16_t)EEPROM.read(EEPROM_BASE_ADDR) | ((uint16_t)EEPROM.read(EEPROM_BASE_ADDR+1) << 8);
+  if (magic != EEPROM_MAGIC) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); return; }
+  uint8_t ver = EEPROM.read(EEPROM_BASE_ADDR+2);
+  char regbuf[9]; char pcbbuf[9];
+  for(int i=0;i<8;i++){regbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+3+i);pcbbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+11+i);}
+  regbuf[8]=0;pcbbuf[8]=0;
+  if(ver<=2){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  if(ver!=EEPROM_FORMAT_VERSION){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  char snbuf[10];for(int i=0;i<9;i++)snbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+19+i);snbuf[9]=0;
+  if(EEPROM.read(EEPROM_BASE_ADDR+28)!=calcCfgChecksum(ver,regbuf,pcbbuf,snbuf)){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  int ri=0;for(int i=0;i<8;i++)if(regbuf[i]!=0&&regbuf[i]!=' ')CFG_AIRCRAFT_REG[ri++]=regbuf[i];CFG_AIRCRAFT_REG[ri]=0;
+  int pi=0;for(int i=0;i<8;i++)if(pcbbuf[i]!=0&&pcbbuf[i]!=' ')CFG_PCB_VERSION[pi++]=pcbbuf[i];CFG_PCB_VERSION[pi]=0;
+  int si=0;for(int i=0;i<8;i++)if(snbuf[i]!=0&&snbuf[i]!=' ')CFG_SERIAL_NUMBER[si++]=snbuf[i];CFG_SERIAL_NUMBER[si]=0;
+  if(si==0){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();}
+}
+
+void saveHWInfo() {
+  char regbuf[8];int rl=strlen(CFG_AIRCRAFT_REG);for(int i=0;i<8;i++)regbuf[i]=(i<rl)?CFG_AIRCRAFT_REG[i]:' ';
+  char pcbbuf[8];int pl=strlen(CFG_PCB_VERSION);for(int i=0;i<8;i++)pcbbuf[i]=(i<pl)?CFG_PCB_VERSION[i]:' ';
+  char snbuf[9];int sl=strlen(CFG_SERIAL_NUMBER);for(int i=0;i<8;i++)snbuf[i]=(i<sl)?CFG_SERIAL_NUMBER[i]:' ';snbuf[8]=0;
+  EEPROM.update(EEPROM_BASE_ADDR+0,(uint8_t)(EEPROM_MAGIC&0xFF));
+  EEPROM.update(EEPROM_BASE_ADDR+1,(uint8_t)((EEPROM_MAGIC>>8)&0xFF));
+  EEPROM.update(EEPROM_BASE_ADDR+2,EEPROM_FORMAT_VERSION);
+  for(int i=0;i<8;i++)EEPROM.update(EEPROM_BASE_ADDR+3+i,(uint8_t)regbuf[i]);
+  for(int i=0;i<8;i++)EEPROM.update(EEPROM_BASE_ADDR+11+i,(uint8_t)pcbbuf[i]);
+  for(int i=0;i<9;i++)EEPROM.update(EEPROM_BASE_ADDR+19+i,(uint8_t)snbuf[i]);
+  EEPROM.update(EEPROM_BASE_ADDR+28,calcCfgChecksum(EEPROM_FORMAT_VERSION,regbuf,pcbbuf,snbuf));
+}
+
 // ==== Soft reset ====
 void performReset() {
   Serial.println("RESET: performing soft reset...");
@@ -351,7 +409,11 @@ void handleSerialCommand(String line) {
   Serial.print("CMD recv: "); Serial.println(cmd);
 
   if (cmd == "VER") {
-    Serial.println(IDENT_STRING);
+    Serial.print(IDENT_STRING);
+    if (CFG_SERIAL_NUMBER[0] != 0) {
+      Serial.print(", SN:"); Serial.print(PANEL_SN_PREFIX); Serial.print(CFG_SERIAL_NUMBER);
+    }
+    Serial.println();
     delay(50);
     return;
   }
@@ -464,6 +526,45 @@ void handleSerialCommand(String line) {
     return;
   }
 
+  // --- SET commands (space-delimited) ---
+  if (cmd == "SET") {
+    String rest = (sp == -1) ? "" : line.substring(sp + 1);
+    int sp2 = rest.indexOf(' ');
+    String scmd = (sp2 == -1) ? rest : rest.substring(0, sp2);
+    String arg = (sp2 == -1) ? "" : rest.substring(sp2 + 1);
+    scmd.toUpperCase(); arg.trim();
+    
+    if (scmd == "ENA") {
+      if (arg == SETTINGS_PIN) { settingsEnabled = true; Serial.println("SET ENA> ;"); }
+      else { Serial.println("SET ENA:FAIL ;"); }
+    }
+    else if (scmd == "SN" && settingsEnabled) {
+      if (arg.length() == 8) {
+        bool valid = true;
+        for (int i = 0; i < 8 && valid; i++) {
+          char c = arg.charAt(i);
+          if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) valid = false;
+        }
+        if (valid) {
+          arg.toUpperCase();
+          for (int i = 0; i < 8; i++) CFG_SERIAL_NUMBER[i] = arg.charAt(i);
+          CFG_SERIAL_NUMBER[8] = 0;
+          Serial.print("SET SN:OK:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+        } else Serial.println("SET SN:FORMAT ;");
+      } else Serial.println("SET SN:FORMAT ;");
+    }
+    else if (scmd == "EXIT") { settingsEnabled = false; Serial.println("SET EXIT:OK ;"); }
+    else if (scmd == "WRI" && settingsEnabled) {
+      if (arg.equalsIgnoreCase("YES")) { saveHWInfo(); settingsEnabled = false; Serial.println("SET WRI:OK ;"); performReset(); }
+      else Serial.println("SET WRI:FORMAT ;");
+    }
+    else if (scmd == "WRITE") {
+      if (settingsEnabled) { saveHWInfo(); settingsEnabled = false; Serial.println("WRITE:OK ;"); }
+      else Serial.println("WRITE:LOCKED ;");
+    }
+    return;
+  }
+
   Serial.print("Unknown command: ");
   Serial.println(line);
 }
@@ -474,6 +575,7 @@ String serialBuffer = "";
 void setup() {
   Serial.begin(SERIAL_BAUD);
   while (!Serial) { delay(2); }
+  loadHWInfo();
   Serial.println();
   Serial.println("ACCU Press Modul (Race-safe) initialising...");
 

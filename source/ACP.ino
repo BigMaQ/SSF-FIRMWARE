@@ -2,6 +2,7 @@
 // Sauberer, human-readable Sketch mit HC165 Off-by-One Fix und Poti-Optimierung
 
 #include <EEPROM.h>
+#include <avr/wdt.h>
 
 // --- Pins ---
 const int muxSelectPins[] = {A0, A1, A2, A3}; // S0..S3
@@ -18,9 +19,20 @@ const int backlightPWM = 3;
 const int annunPWM     = 6;
 
 // --- Panel identification ---
-const char* PANEL_IDENT = "ACP 1 CPT, v2.0 MAQ";
+const char* PANEL_IDENT = "ACP 1 CPT, v2.1 MAQ";
+const char  FW_VERSION[] = "2.1";
+const char  PANEL_SN_PREFIX[] = "ACP-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
+
+// Serial Number
+char CFG_SERIAL_NUMBER[10] = "";
+
+// --- Config variables ---
+char CFG_AIRCRAFT_REG[9] = "D-A320";
+char CFG_PCB_VERSION[9] = "PCB 1.0";
+bool settingsEnabled = false;
+const char SETTINGS_PIN[] = "0815";
 
 // --- Hardware revision (EEPROM persistent) ---
 // Rev 1: 2 LED shift-registers (16 LEDs)
@@ -175,6 +187,62 @@ bool saveHwRevisionToEEPROM(uint8_t rev) {
   return true;
 }
 
+// --- EEPROM config v3 infrastructure ---
+const int EEPROM_BASE_ADDR = 10; // Start after HWREV byte
+const uint16_t EEPROM_MAGIC = 0xA55A;
+const uint8_t EEPROM_FORMAT_VERSION = 3;
+
+void generateSerialNumber(char* out) {
+  randomSeed(analogRead(A0) + analogRead(A1) + micros());
+  const char hexChars[] = "0123456789ABCDEF";
+  for (int i = 0; i < 8; i++) { out[i] = hexChars[random(0, 16)]; }
+  out[8] = 0;
+}
+
+uint8_t calcCfgChecksum(uint8_t version, const char *reg8, const char *pcb8, const char *sn9) {
+  uint16_t sum = version;
+  for (int i = 0; i < 8; i++) sum += (uint8_t)reg8[i];
+  for (int i = 0; i < 8; i++) sum += (uint8_t)pcb8[i];
+  for (int i = 0; i < 9; i++) sum += (uint8_t)sn9[i];
+  return (uint8_t)(sum & 0xFF);
+}
+
+void loadHWInfo() {
+  uint16_t magic = (uint16_t)EEPROM.read(EEPROM_BASE_ADDR) | ((uint16_t)EEPROM.read(EEPROM_BASE_ADDR+1) << 8);
+  if (magic != EEPROM_MAGIC) { generateSerialNumber(CFG_SERIAL_NUMBER); saveHWInfo(); return; }
+  uint8_t ver = EEPROM.read(EEPROM_BASE_ADDR+2);
+  char regbuf[9]; char pcbbuf[9];
+  for (int i=0;i<8;i++){regbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+3+i);pcbbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+11+i);}
+  regbuf[8]=0;pcbbuf[8]=0;
+  if(ver<=2){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  if(ver!=EEPROM_FORMAT_VERSION){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  char snbuf[10];for(int i=0;i<9;i++)snbuf[i]=(char)EEPROM.read(EEPROM_BASE_ADDR+19+i);snbuf[9]=0;
+  if(EEPROM.read(EEPROM_BASE_ADDR+28)!=calcCfgChecksum(ver,regbuf,pcbbuf,snbuf)){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();return;}
+  int ri=0;for(int i=0;i<8;i++)if(regbuf[i]!=0&&regbuf[i]!=' ')CFG_AIRCRAFT_REG[ri++]=regbuf[i];CFG_AIRCRAFT_REG[ri]=0;
+  int pi=0;for(int i=0;i<8;i++)if(pcbbuf[i]!=0&&pcbbuf[i]!=' ')CFG_PCB_VERSION[pi++]=pcbbuf[i];CFG_PCB_VERSION[pi]=0;
+  int si=0;for(int i=0;i<8;i++)if(snbuf[i]!=0&&snbuf[i]!=' ')CFG_SERIAL_NUMBER[si++]=snbuf[i];CFG_SERIAL_NUMBER[si]=0;
+  if(si==0){generateSerialNumber(CFG_SERIAL_NUMBER);saveHWInfo();}
+}
+
+void saveHWInfo() {
+  char regbuf[8];int rl=strlen(CFG_AIRCRAFT_REG);for(int i=0;i<8;i++)regbuf[i]=(i<rl)?CFG_AIRCRAFT_REG[i]:' ';
+  char pcbbuf[8];int pl=strlen(CFG_PCB_VERSION);for(int i=0;i<8;i++)pcbbuf[i]=(i<pl)?CFG_PCB_VERSION[i]:' ';
+  char snbuf[9];int sl=strlen(CFG_SERIAL_NUMBER);for(int i=0;i<8;i++)snbuf[i]=(i<sl)?CFG_SERIAL_NUMBER[i]:' ';snbuf[8]=0;
+  EEPROM.update(EEPROM_BASE_ADDR+0,(uint8_t)(EEPROM_MAGIC&0xFF));
+  EEPROM.update(EEPROM_BASE_ADDR+1,(uint8_t)((EEPROM_MAGIC>>8)&0xFF));
+  EEPROM.update(EEPROM_BASE_ADDR+2,EEPROM_FORMAT_VERSION);
+  for(int i=0;i<8;i++)EEPROM.update(EEPROM_BASE_ADDR+3+i,(uint8_t)regbuf[i]);
+  for(int i=0;i<8;i++)EEPROM.update(EEPROM_BASE_ADDR+11+i,(uint8_t)pcbbuf[i]);
+  for(int i=0;i<9;i++)EEPROM.update(EEPROM_BASE_ADDR+19+i,(uint8_t)snbuf[i]);
+  EEPROM.update(EEPROM_BASE_ADDR+28,calcCfgChecksum(EEPROM_FORMAT_VERSION,regbuf,pcbbuf,snbuf));
+}
+
+void triggerSoftwareReset() {
+  Serial.flush(); delay(50);
+  wdt_enable(WDTO_15MS);
+  while(true){}
+}
+
 // --- MUX read helpers ---
 int readMuxChannelRaw(int idx) {
   for (int b = 0; b < 4; ++b) digitalWrite(muxSelectPins[b], (idx >> b) & 1);
@@ -226,6 +294,9 @@ void readShiftRegisters(uint8_t &in1, uint8_t &in2) {
 // --- Serial IDENT / state ---
 void sendIdentAndState() {
   Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
+  if (CFG_SERIAL_NUMBER[0] != 0) {
+    Serial.print(", SN:"); Serial.print(PANEL_SN_PREFIX); Serial.print(CFG_SERIAL_NUMBER);
+  }
   Serial.print(";STATE:RUNNING;");
   Serial.print("HWREV:"); Serial.print(hwRevision); Serial.print(";");
   Serial.println();
@@ -286,6 +357,70 @@ void processIncomingLine(const String &line) {
     }
     else if (key.equalsIgnoreCase("REQ")) forceSendNext = true;
     else if (key.equalsIgnoreCase("VER")) sendIdentAndState();
+    // --- SET commands (case-insensitive key check) ---
+    else if (key.equalsIgnoreCase("SET") || key.startsWith("SET ")) {
+      // token = "SET SN:D27B18BB" → nach "SET " = "SN:D27B18BB"
+      // Fallback: falls key nur "SET" ist (Doppelpunkt-Split-Issue), val = "SN:D27B18BB"
+      String rest;
+      if (key.equalsIgnoreCase("SET")) {
+        rest = val;  // val enthält bereits "SN:D27B18BB"
+      } else {
+        rest = token.substring(token.indexOf(' ') + 1); // "SN:D27B18BB"
+      }
+      rest.trim();
+      int colonPos = rest.indexOf(':');
+      String cmd = (colonPos >= 0) ? rest.substring(0, colonPos) : rest;
+      String arg = (colonPos >= 0) ? rest.substring(colonPos + 1) : "";
+      cmd.toUpperCase(); arg.trim();
+      
+      if (cmd == "ENA") {
+        if (arg == SETTINGS_PIN) { settingsEnabled = true; Serial.println("SET ENA> ;"); }
+        else { Serial.println("SET ENA:FAIL ;"); }
+      }
+      else if (cmd == "FW" && settingsEnabled) {
+        int dotPos = arg.indexOf('.');
+        if (dotPos > 0 && dotPos < arg.length() - 1) {
+          int major = arg.substring(0, dotPos).toInt();
+          int minor = arg.substring(dotPos + 1).toInt();
+          if (major >= 1 && major <= 9 && minor >= 0 && minor <= 9) {
+            snprintf(CFG_PCB_VERSION, 9, "PCb %d.%d", major, minor);
+            Serial.println("SET FW:OK ;");
+          } else Serial.println("SET FW:RANGE ;");
+        } else Serial.println("SET FW:FORMAT ;");
+      }
+      else if (cmd == "ACID" && settingsEnabled) {
+        if (arg.length() >= 3 && arg.length() <= 8 && arg.indexOf('-') == 1 && isAlpha(arg.charAt(0))) {
+          bool valid = true;
+          for (int i = 2; i < arg.length(); i++) if (!isAlpha(arg.charAt(i))) { valid = false; break; }
+          if (valid) { strncpy(CFG_AIRCRAFT_REG, arg.c_str(), 8); CFG_AIRCRAFT_REG[8] = 0; Serial.println("SET ACID:OK ;"); }
+          else Serial.println("SET ACID:FORMAT ;");
+        } else Serial.println("SET ACID:FORMAT ;");
+      }
+      else if (cmd == "SN" && settingsEnabled) {
+        if (arg.length() == 8) {
+          bool valid = true;
+          for (int i = 0; i < 8 && valid; i++) {
+            char c = arg.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) valid = false;
+          }
+          if (valid) {
+            arg.toUpperCase();
+            for (int i = 0; i < 8; i++) CFG_SERIAL_NUMBER[i] = arg.charAt(i);
+            CFG_SERIAL_NUMBER[8] = 0;
+            Serial.print("SET SN:OK:"); Serial.print(PANEL_SN_PREFIX); Serial.println(CFG_SERIAL_NUMBER);
+          } else Serial.println("SET SN:FORMAT ;");
+        } else Serial.println("SET SN:FORMAT ;");
+      }
+      else if (cmd == "EXIT") { settingsEnabled = false; Serial.println("SET EXIT:OK ;"); }
+      else if (cmd == "WRI" && settingsEnabled) {
+        if (arg.equalsIgnoreCase("YES")) { saveHWInfo(); settingsEnabled = false; Serial.println("SET WRI:OK ;"); triggerSoftwareReset(); }
+        else Serial.println("SET WRI:FORMAT ;");
+      }
+      else if (cmd == "WRITE") {
+        if (settingsEnabled) { saveHWInfo(); settingsEnabled = false; Serial.println("WRITE:OK ;"); }
+        else Serial.println("WRITE:LOCKED ;");
+      }
+    }
   }
 }
 
@@ -346,6 +481,7 @@ void sendStatus() {
 void setup() {
   Serial.begin(115200);
   loadHwRevisionFromEEPROM();
+  loadHWInfo();
   for(int i=0;i<4;i++) pinMode(muxSelectPins[i], OUTPUT);
   pinMode(muxOutputPin, INPUT);
   pinMode(inputDataPin, INPUT); pinMode(inputClockPin, OUTPUT); pinMode(inputLatchPin, OUTPUT);
