@@ -234,8 +234,9 @@ void setDisplayBrightness(uint8_t b) {
 
 void initDisplay() {
   lc.shutdown(0, false);
-  lc.setIntensity(0, displayBrightness);
+  lc.setIntensity(0, 15);        // Max Helligkeit beim Boot
   lc.clearDisplay(0);
+  delay(10);                     // Kurze Pause fuer MAX7219
 }
 
 // ============================================================================
@@ -556,8 +557,8 @@ void runBoot() {
   else {
     desiredLedState = 0; applyLEDOutputs();
     updateDisplay("    ");
+    lc.setIntensity(0, displayBrightness);  // Benutzer-Helligkeit wiederherstellen
     bootDone = true;
-    sendIdentAndState();
   }
 }
 
@@ -634,16 +635,22 @@ void setup() {
   // Load EEPROM configuration
   loadHWInfo();
 
+  // IDENT sofort senden – Panel muss ab Boot für Scans bereit sein
+  sendIdentAndState();
+
   bootStart = millis();
 }
 
 void loop() {
   unsigned long now = millis();
-  if (!bootDone) { runBoot(); return; }
+  
+  // ── Boot-Sequenz (non-blocking: Serial wird IMMER verarbeitet) ──
+  if (!bootDone) { runBoot(); }
+  // Serial auch während Boot verarbeiten – Panel antwortet sofort auf VER/IDENT!
+  processSerial();
+  if (!bootDone) return;  // Während Boot: nur Serial + Animation, keine Inputs
 
   if (diagMode == DIAG_RUNNING) { runDiag(); return; }
-
-  processSerial();
 
   // Inputs with debounce
   uint8_t currentIn1, currentIn2;
