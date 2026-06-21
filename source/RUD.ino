@@ -33,8 +33,8 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.1 MAQ";
-const char  FW_VERSION[] = "1.1";
+const char* PANEL_IDENT = "RUD, v1.2 MAQ";
+const char  FW_VERSION[] = "1.2";
 const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
 
@@ -316,9 +316,13 @@ uint8_t parseBin8(const String &s) {
 // ============================================================================
 String serialAccum = "";
 unsigned long lastSendTs = 0;
+unsigned long lastAnalogSendTs = 0;
 const unsigned long SEND_MIN_INTERVAL_MS = 10;
+const unsigned long ANALOG_SEND_MIN_INTERVAL_MS = 200;  // storm control: max 5 analog sends/sec
+const int POT_DEADBAND = 20;  // deadband for analog pot (was 4 — floating pins trigger noise)
 int potValue = 0;
 int lastPotValue = 0;
+int lastSentPotValue = 0;  // separate tracking for send rate limiting
 
 void sendIdentAndState() {
   Serial.print("IDENT:"); Serial.print(PANEL_IDENT);
@@ -652,7 +656,7 @@ void loop() {
 
   if (diagMode == DIAG_RUNNING) { runDiag(); return; }
 
-  // Inputs with debounce
+  // Inputs with debounce (respect SEND_MIN_INTERVAL_MS — no force)
   uint8_t currentIn1, currentIn2;
   readShiftRegisters(currentIn1, currentIn2);
   bool changed = (currentIn1 != lastInputState1) || (currentIn2 != lastInputState2);
@@ -662,16 +666,21 @@ void loop() {
     lastInputState2 = currentIn2;
     inputState1 = currentIn1;
     inputState2 = currentIn2;
-    sendStatus(true);
+    sendStatus(false);  // respect SEND_MIN_INTERVAL_MS (10ms) — no force
   }
 
-  // Potentiometer handling (deadband to reduce noise)
+  // Potentiometer handling (deadband + storm control)
   potValue = analogRead(potPin);
-  if (abs(potValue - lastPotValue) > 4) {
+  if (abs(potValue - lastPotValue) > POT_DEADBAND) {
     lastPotValue = potValue;
     // Map pot to backlight by default; host can override via BL command
     desiredBacklight = map(potValue, 0, 1023, 0, 255);
     analogWrite(backlightPwmPin, desiredBacklight);
-    sendStatus(true);
+    // Storm control: only send analog changes at ANALOG_SEND_MIN_INTERVAL_MS
+    if (abs(potValue - lastSentPotValue) > POT_DEADBAND || (now - lastAnalogSendTs) >= ANALOG_SEND_MIN_INTERVAL_MS) {
+      lastAnalogSendTs = now;
+      lastSentPotValue = potValue;
+      sendStatus(true);
+    }
   }
 }
