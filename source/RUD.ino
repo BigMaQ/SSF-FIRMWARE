@@ -33,8 +33,8 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.2 MAQ";
-const char  FW_VERSION[] = "1.2";
+const char* PANEL_IDENT = "RUD, v1.3 MAQ";
+const char  FW_VERSION[] = "1.3";
 const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
 
@@ -198,32 +198,40 @@ byte charTo7Seg(char c) {
 }
 
 void updateDisplay(const String &txt) {
-  // Render up to 4 visible characters; '.' after a character sets its decimal point
-  // The '.' itself does not consume a display position.
-  String t = txt;
-  int src = 0;
-  for (int digit = 0; digit < 4; digit++) {
-    // Skip any leading dots (no preceding char to attach to)
-    while (src < t.length() && t.charAt(src) == '.') src++;
+  // Parse incoming value from SIM (e.g. "0.400", "-0.40", "12.500", "12.50")
+  // Format: [A/L][tens or space][ones].[tenths] — always 4 chars, 1 decimal
+  float val = txt.toFloat();
+  bool neg = (val < 0.0f);
+  float absVal = neg ? -val : val;
 
+  // Clamp to 0.0..20.0
+  if (absVal > 20.0f) absVal = 20.0f;
+  if (absVal < 0.0f)  absVal = 0.0f;
+
+  int tenths = (int)(absVal * 10.0f + 0.5f);  // 0..200
+  int ones   = (tenths / 10) % 10;             // 0..9
+  int tens   = (tenths / 100);                 // 0..2
+  int frac   = tenths % 10;                    // 0..9
+
+  char c0 = neg ? 'L' : 'A';
+  char c1 = (tenths >= 100) ? ('0' + tens) : ' ';
+  char c2 = '0' + ones;
+  char c3 = '0' + frac;
+
+  // c2 gets the decimal point
+  for (int digit = 0; digit < 4; digit++) {
     char c = ' ';
     bool dp = false;
-    if (src < t.length()) {
-      c = t.charAt(src);
-      // If next char is a dot, attach DP to current char without consuming a position
-      if ((src + 1) < t.length() && t.charAt(src + 1) == '.') {
-        dp = true;
-      }
-      // Advance past the visible character and any single trailing dot
-      src++;
-      if (src < t.length() && t.charAt(src) == '.') src++;
+    switch (digit) {
+      case 0: c = c0; break;
+      case 1: c = c1; break;
+      case 2: c = c2; dp = true; break;
+      case 3: c = c3; break;
     }
-
     byte pattern = charTo7Seg(c);
-    if (dp) pattern |= 0b10000000;  // DP bit
+    if (dp) pattern |= 0b10000000;
     lc.setRow(0, 3 - digit, pattern);
   }
-  // Store last requested text (not strictly used by renderer)
   displayMain = txt;
 }
 
