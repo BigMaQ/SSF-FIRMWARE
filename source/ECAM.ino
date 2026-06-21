@@ -385,6 +385,7 @@ void handleKeyValueToken(const char* key, const char* val) {
       else Serial.println("WRITE:LOCKED ;");
     }
   }
+} // handleKeyValueToken
 
 void handleSingleWordToken(const char* token) {
   if (strcasecmp(token, "VER") == 0 || strcasecmp(token, "VERSION") == 0) sendIdentAndState();
