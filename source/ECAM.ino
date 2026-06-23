@@ -21,8 +21,8 @@ const int pot1Pin       = A9;
 const int pot2Pin       = A10;
 
 // --- Panel identification ---
-const char* PANEL_IDENT = "ECAM, v1.1 MAQ";
-const char  FW_VERSION[] = "1.1";
+const char* PANEL_IDENT = "ECAM, v1.2 MAQ";
+const char  FW_VERSION[] = "1.2";
 const char  PANEL_SN_PREFIX[] = "ECAM-";
 bool identSentOnStart   = false;
 unsigned long pauseUntil = 0;
@@ -96,6 +96,12 @@ uint8_t lastInputState4 = 0xFF;
 unsigned long comboStartTime = 0;
 int comboStage = 0;
 bool forceSendNext = false;
+
+// --- Non-blocking Boot ---
+uint8_t  bootPhase = 0;
+unsigned long bootPhaseStart = 0;
+bool bootComplete = false;
+const unsigned long BOOT_PHASE_MS = 200;
 
 // --- Serial Parser ---
 const int SERIAL_BUF_SIZE = 128;
@@ -485,12 +491,11 @@ void setup() {
     pot2Buffer[i] = 0;
   }
 
-  // Startup Diagnose
-  setLEDState(0xAA, 0xAA, 0xAA, 0xAA, 200, 200, true); delay(150);
-  setLEDState(0x55, 0x55, 0x55, 0x55, 200, 200, true); delay(150);
-  setLEDState(0xFF, 0xFF, 0xFF, 0xFF, 0,   0,   true); delay(150);
-  setLEDState(0x00, 0x00, 0x00, 0x00, 0,   0,   true); delay(150);
+  // Boot-Sequenz starten (non-blocking, wird in loop() abgearbeitet)
+  bootPhase = 0;
+  bootPhaseStart = millis();
 
+  // IDENT sofort senden – kein delay, Panel muss ab Boot für Scans bereit sein
   sendIdentAndState();
   identSentOnStart = true;
   forceSendNext = true;
@@ -505,6 +510,28 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  // ── Non-blocking Boot-Sequenz (parallel, Serial wird NICHT blockiert) ──
+  if (!bootComplete) {
+    if (now - bootPhaseStart >= BOOT_PHASE_MS) {
+      bootPhaseStart = now;
+      switch (bootPhase) {
+        case 0: desiredLed1 = 0xAA; desiredLed2 = 0xAA; desiredLed3 = 0xAA; desiredLed4 = 0xAA;
+                desiredBlLevel = 200; desiredAnLevel = 200; applyLEDOutputs(); break;
+        case 1: desiredLed1 = 0x55; desiredLed2 = 0x55; desiredLed3 = 0x55; desiredLed4 = 0x55;
+                desiredBlLevel = 200; desiredAnLevel = 200; applyLEDOutputs(); break;
+        case 2: desiredLed1 = 0xFF; desiredLed2 = 0xFF; desiredLed3 = 0xFF; desiredLed4 = 0xFF;
+                desiredBlLevel = 0;   desiredAnLevel = 0;   applyLEDOutputs(); break;
+        case 3: desiredLed1 = 0x00; desiredLed2 = 0x00; desiredLed3 = 0x00; desiredLed4 = 0x00;
+                desiredBlLevel = 0;   desiredAnLevel = 0;   applyLEDOutputs(); break;
+        case 4: bootComplete = true; break;
+      }
+      bootPhase++;
+    }
+    processSerialInput();  // Serial auch während Boot verarbeiten
+    return;                // Noch keine Inputs/Status senden
+  }
+
   if (now < pauseUntil) return;
 
   processSerialInput();
@@ -560,6 +587,12 @@ void loop() {
     comboStage = 1;
     comboStartTime = now;
     runDiag();   // komplette DIAG-Routine
+  }
+
+  // Combo-Reset nach 15s (wie ACP), sonst bleiben LEDs nach DIAG blockiert
+  if (comboStage == 1 && (now - comboStartTime) >= 15000) {
+    comboStage = 0;
+    setLEDState(0x00, 0x00, 0x00, 0x00, 0, 0, true);
   }
 
   // Ende loop()
