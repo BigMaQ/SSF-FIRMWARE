@@ -1,7 +1,6 @@
 // OHP_SEC.INO – OHP Secondary Panel (Arduino MEGA 2560)
 // (w) 2025 M. Quatember, OHP edition
 // Controls ADIRS, LT, CARGO sections with BLTDRV LED drivers
-#include <LedControl.h>
 #include <EEPROM.h>
 #include <avr/wdt.h>
 
@@ -44,6 +43,8 @@ const int ledClk_CA  = 44; const int ledLatch_CA  = 41; const int ledData_CA  = 
 const uint8_t SLED_PINS[2] = {46, 48};
 #define SLED_COUNT 2
 
+// TLC5916 OE – controlled entirely by Primary (ANNU_BRT / BACKLIGHT_BRT)
+
 // ============================================================================
 // PIN DEFINITIONS – ANALOG
 // ============================================================================
@@ -54,8 +55,8 @@ const uint8_t ANA_PINS[ANALOG_COUNT] = { A5, A6, A7, A8 };
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "OHP_SEC, v1.0 MAQ";
-const char  FW_VERSION[] = "1.0";
+const char* PANEL_IDENT = "OHP_SEC, v1.1 MAQ";
+const char  FW_VERSION[] = "1.1";
 const char  PANEL_SN_PREFIX[] = "OHS-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -89,6 +90,7 @@ uint8_t  anaFltIdx[ANALOG_COUNT] = {0};
 uint8_t  CFG_BUTTON_DEBOUNCE = 12;
 uint16_t CFG_LED_REFRESH = 1200;
 uint16_t CFG_DISPLAY_REFRESH = 1200;
+uint8_t  CFG_ANA_DEADBAND = 5;
 char CFG_AIRCRAFT_REG[9] = "D-A320";
 char CFG_PCB_VERSION[9] = "PCB 1.0";
 bool CFG_PCB_IS_12 = false;
@@ -120,7 +122,17 @@ bool diagReturnToMenu = false;
 bool menuInitialized = false;
 int menuIndex = 0;
 unsigned long lastMenuActivityTs = 0;
-const unsigned long MENU_INACTIVITY_MS = 10000;
+const unsigned long MENU_INACTIVITY_MS = 60000;
+// DIAG LED-Walk sub-state
+int  diagWalkPhase = 0;       // 0=single-bit walk, 1=byte all-on
+int  diagWalkByte = 0;        // current byte index
+unsigned long diagWalkLastTs = 0;
+// DIAG Show sub-state
+int  showPhase = 0;           // 0=KnightRider, 1=Cascade, 2=Breathe, 3=Finale
+int  showStep = 0;
+int  showDir = 1;
+unsigned long showLastTs = 0;
+int  showRepeat = 1;
 
 // ============================================================================
 // TIMING
@@ -165,13 +177,14 @@ void triggerSoftwareReset(bool showMsg=true) {
 }
 
 // ============================================================================
-// LED DRIVER (74HC595) – MULTI-GROUP
+// LED DRIVER (TLC5916) – pure shiftOut, no OE/PWM (Primary does brightness)
 // ============================================================================
 void shiftOutOne(uint8_t clk,uint8_t latch,uint8_t data,const uint8_t* bytes,uint8_t cnt) {
   digitalWrite(latch,LOW);for(int8_t b=cnt-1;b>=0;b--)shiftOut(data,clk,MSBFIRST,bytes[b]);digitalWrite(latch,HIGH);
 }
 void applyLEDOutputs() {
   uint8_t bi=0;
+  // All TLC5916 groups – OE held LOW by Primary, no PWM on Secondary
   shiftOutOne(ledClk_B1,ledLatch_B1,ledData_B1,&desiredLedState[bi],LED_CNT_B1);bi+=LED_CNT_B1;
   shiftOutOne(ledClk_B2,ledLatch_B2,ledData_B2,&desiredLedState[bi],LED_CNT_B2);bi+=LED_CNT_B2;
   shiftOutOne(ledClk_AD,ledLatch_AD,ledData_AD,&desiredLedState[bi],LED_CNT_AD);bi+=LED_CNT_AD;
@@ -196,7 +209,7 @@ void readOneInGrp(uint8_t clk,uint8_t latch,uint8_t data,uint8_t* out,uint8_t cn
 }
 void readAllInputs() {
   uint8_t bi=0;
-  readOneInGrp(inClk_AD,inLatch_AD,inData_AD,&inputState[bi],IN_CNT_AD);bi+=IN_CNT_AD;
+  readOneInGrp(inClk_AD,inLatch_AD,inData_AD,&inputState[bi],IN_CNT_AD); bi+=IN_CNT_AD;
   readOneInGrp(inClk_LT,inLatch_LT,inData_LT,&inputState[bi],IN_CNT_LT);bi+=IN_CNT_LT;
   readOneInGrp(inClk_CA,inLatch_CA,inData_CA,&inputState[bi],IN_CNT_CA);bi+=IN_CNT_CA;
   uint8_t s=0;for(uint8_t i=0;i<IN_SINGLE_COUNT;i++)if(digitalRead(SIN_PINS[i])==LOW)s|=(1<<i);
@@ -213,7 +226,7 @@ void readAnalogFiltered() {
   }
 }
 bool analogChanged() {
-  for(uint8_t i=0;i<ANALOG_COUNT;i++){int16_t d=(int16_t)analogValues[i]-(int16_t)lastAnalogValues[i];if(d<-5||d>5){lastAnalogValues[i]=analogValues[i];return true;}}return false;
+  for(uint8_t i=0;i<ANALOG_COUNT;i++){int16_t d=(int16_t)analogValues[i]-(int16_t)lastAnalogValues[i];int16_t db=(int16_t)CFG_ANA_DEADBAND;if(d<-db||d>db){lastAnalogValues[i]=analogValues[i];return true;}}return false;
 }
 
 // ============================================================================
@@ -231,8 +244,8 @@ void maybeSendIdentStartup() { if(!identSentOnStart){delay(150);sendIdentAndStat
 // ============================================================================
 void sendStatusImmediate() {
   char b8[9];
-  for(uint8_t i=0;i<IN_TOTAL_BYTES;i++){bin8(b8,inputState[i]);Serial.print("IN");Serial.print(i);Serial.print(":");Serial.print(b8);Serial.print(";");}
-  for(uint8_t i=0;i<ANALOG_COUNT;i++){Serial.print("POT");Serial.print(i);Serial.print(":");Serial.print(analogValues[i]);Serial.print(";");}
+  for(uint8_t i=0;i<IN_TOTAL_BYTES;i++){bin8(b8,inputState[i]);Serial.print("IN");Serial.print(i+1);Serial.print(":");Serial.print(b8);Serial.print(";");}
+  for(uint8_t i=0;i<ANALOG_COUNT;i++){Serial.print("POT");Serial.print(i+1);Serial.print(":");Serial.print(analogValues[i]);Serial.print(";");}
   Serial.println();lastSendTs=millis();forceSendNext=false;
 }
 
@@ -258,8 +271,8 @@ void processIncomingLine(const char* line) {
       *colon=0;char* key=tok;char* val=colon+1;
       int ke=strlen(key)-1;while(ke>=0&&key[ke]==' ')key[ke--]=0;char* kp=key;while(*kp==' ')kp++;
       while(*val==' ')val++;int ve=strlen(val)-1;while(ve>=0&&val[ve]==' ')val[ve--]=0;
-      // LEDx (0..LED_TOTAL_BYTES, LED_TOTAL_BYTES = single LEDs)
-      if(kp[0]=='L'&&kp[1]=='E'&&kp[2]=='D'){uint8_t idx=atoi_s(kp+3);if(idx<=LED_TOTAL_BYTES){desiredLedState[idx]=parseBin8(val);applyLEDOutputs();}}
+      // LEDx (case-insensitive, 0..LED_TOTAL_BYTES incl single LEDs) – silent apply, matching RMP behavior
+      if(stripre(kp,"LED")){int idx=atoi_s(kp+3)-1;if(idx>=0&&idx<=LED_TOTAL_BYTES){desiredLedState[idx]=parseBin8(val);applyLEDOutputs();}}
       else if(strieq(kp,"STATE")){hostOnline=(strcmp(val,"01")==0||strcmp(val,"1")==0);}
       else if(strieq(kp,"DISP_BL")){} // accepted but no-op (no displays)
       else if(strieq(kp,"REQ")){forceSendNext=true;}
@@ -267,6 +280,7 @@ void processIncomingLine(const char* line) {
       else if(strieq(kp,"CFG")){char* cp=val;
         while(*cp){while(*cp==' '||*cp==';')cp++;if(!*cp)break;char* semi=strchr(cp,';');if(semi)*semi=0;
           if(stripre(cp,"DEB"))CFG_BUTTON_DEBOUNCE=constrain(atoi_s(cp+3),0,99);
+          else if(stripre(cp,"DEAD"))CFG_ANA_DEADBAND=constrain(atoi_s(cp+4),1,100);
           else if(stripre(cp,"LED"))CFG_LED_REFRESH=constrain(atoi_s(cp+3),100,10000);
           else if(stripre(cp,"DSP"))CFG_DISPLAY_REFRESH=constrain(atoi_s(cp+3),100,10000);
           else if(stripre(cp,"REG:")){strncpy(CFG_AIRCRAFT_REG,cp+4,8);CFG_AIRCRAFT_REG[8]=0;}
@@ -300,36 +314,171 @@ void processSerialTokensFromHost() {
       if(token[0]==0)continue;
       char tokenUp[32];for(ti=0;token[ti]&&ti<31;ti++)tokenUp[ti]=(token[ti]>='a'&&token[ti]<='z')?token[ti]-32:token[ti];tokenUp[ti]=0;
       if(strcmp(tokenUp,"VER")==0||strcmp(tokenUp,"VERSION")==0||strcmp(tokenUp,"IDENT")==0){sendIdentAndState();identSentOnStart=true;bootMessageShown=true;bootMessageStart=millis();continue;}
-      if(strcmp(tokenUp,"EXIT")==0){settingsEnabled=false;Serial.println("EXIT:OK ;");continue;}
+      if(strcmp(tokenUp,"EXIT")==0){if(bootState==BOOT_DIAG_MENU){bootState=BOOT_RUNNING;menuInitialized=false;diagStage=0;ledClearAll();Serial.println("DIAG:EXIT;");}else{settingsEnabled=false;Serial.println("EXIT:OK ;");}continue;}
       if(strcmp(tokenUp,"PCB")==0){Serial.print("PCB:");char* sp=strchr(CFG_PCB_VERSION,' ');if(sp&&*(sp+1)){Serial.print("v");Serial.print(sp+1);}else Serial.print(CFG_PCB_VERSION);Serial.println(" ;");continue;}
       if(strcmp(tokenUp,"RESET")==0){Serial.println("RESET:OK ;");triggerSoftwareReset();continue;}
       if(strcmp(tokenUp,"REQ")==0){sendStatusImmediate();continue;}
-      if(strcmp(tokenUp,"DIAG")==0){if(bootState==BOOT_RUNNING){bootState=BOOT_DIAG_MENU;diagStartTime=millis();diagStage=0;menuInitialized=false;Serial.println("DIAG:MENU_START;");}continue;}
+      if (strcmp(tokenUp,"DIAG")==0){bootState=BOOT_DIAG_MENU;diagStartTime=millis();diagStage=0;menuInitialized=false;ledClearAll();Serial.println("DIAG:MENU;");continue;}
+      // ---- DIAG serial navigation (works only in DIAG mode) ----
+      if (bootState==BOOT_DIAG_MENU) {
+        lastMenuActivityTs=millis();
+        if (strcmp(tokenUp,"NEXT")==0)  { menuIndex=(menuIndex+1)%4; Serial.print("DIAG:MENU:");Serial.println(menuIndex); if(menuIndex==0){Serial.println("DIAG:LED_WALK;");diagStage=1;diagWalkPhase=0;diagWalkByte=0;diagWalkLastTs=millis();ledClearAll();} else if(menuIndex==1){Serial.println("DIAG:INPUTS;"); diagStage=0; readAllInputs(); for(uint8_t i=0;i<IN_TOTAL_BYTES;i++){char b8[9];bin8(b8,inputState[i]);Serial.print("IN");Serial.print(i+1);Serial.print("=");Serial.print(b8);Serial.print(";");}Serial.println();} else if(menuIndex==2){diagStage=0; Serial.print("HEALTH:UPTIME=");Serial.print(millis()/1000);Serial.print("s;LASTERR=0;FREEMEM=");extern int __heap_start,*__brkval;int vv;Serial.print((int)&vv-(__brkval==0?(int)&__heap_start:(int)__brkval));Serial.print(";VERSION=");Serial.print(FW_VERSION);Serial.println(";");Serial.println("DIAG:ALL_OK;");} else if(menuIndex==3){bootState=BOOT_RUNNING;menuInitialized=false;diagStage=0;ledClearAll();Serial.println("DIAG:EXIT;");} continue;}
+        if (strcmp(tokenUp,"LED")==0)  { menuIndex=0; Serial.println("DIAG:LED_WALK;");diagStage=1;diagWalkPhase=0;diagWalkByte=0;diagWalkLastTs=millis();ledClearAll();continue;}
+        if (strcmp(tokenUp,"IN")==0)   { diagStage=0; readAllInputs(); for(uint8_t i=0;i<IN_TOTAL_BYTES;i++){char b8[9];bin8(b8,inputState[i]);Serial.print("IN");Serial.print(i+1);Serial.print("=");Serial.print(b8);Serial.print(";");}Serial.println();continue;}
+        if (strcmp(tokenUp,"HEALTH")==0){ diagStage=0; Serial.print("HEALTH:UPTIME=");Serial.print(millis()/1000);Serial.print("s;LASTERR=0;FREEMEM=");extern int __heap_start,*__brkval;int vv;Serial.print((int)&vv-(__brkval==0?(int)&__heap_start:(int)__brkval));Serial.print(";VERSION=");Serial.print(FW_VERSION);Serial.println(";");continue;}
+        if (strcmp(tokenUp,"SHOW")==0||strncmp(tokenUp,"SHOW:",5)==0) {
+          showRepeat=1;
+          if(tokenUp[4]==':'){int n=atoi_s(tokenUp+5);if(n>=1&&n<=9)showRepeat=n;}
+          menuIndex=4; Serial.print("DIAG:SHOW_START x");Serial.print(showRepeat);Serial.println(";");
+          diagStage=3;showPhase=0;showStep=0;showDir=1;showLastTs=millis();ledClearAll();continue;
+        }
+      }
       if(strchr(token,':')!=NULL){char lineBuf[64];snprintf(lineBuf,sizeof(lineBuf),"%s;",token);processIncomingLine(lineBuf);continue;}
     }
   }
 }
 
 // ============================================================================
-// DIAG MODE
+// DIAG MODE – Two-phase LED walk: single-bit, then byte-all-on
 // ============================================================================
+void diagLedWalkStep(unsigned long now) {
+  const uint16_t totalBits = (uint16_t)(LED_TOTAL_BYTES+1) * 8;  // +1 for single LED byte
+  const unsigned long SINGLE_MS = 150;
+  const unsigned long BYTE_MS   = 800;
+  lastMenuActivityTs=now;
+
+  if (diagWalkPhase == 0) {
+    if (now - diagWalkLastTs >= SINGLE_MS) {
+      diagWalkLastTs = now;
+      memset(desiredLedState, 0, LED_TOTAL_BYTES+1);  // clear buffer only, no flicker
+      if (diagWalkByte < totalBits) {
+        uint8_t bi = diagWalkByte / 8;
+        desiredLedState[bi] = 1 << (diagWalkByte % 8);
+        applyLEDOutputs();  // single apply
+        Serial.print("DIAG:WALK_BIT="); Serial.print(diagWalkByte);
+        Serial.print("  LED"); Serial.print(bi+1);
+        Serial.print("."); Serial.println(diagWalkByte % 8);
+      } else { applyLEDOutputs(); }
+      diagWalkByte++;
+      if (diagWalkByte > totalBits) {
+        diagWalkPhase = 1; diagWalkByte = 0; diagWalkLastTs = now;
+        Serial.println("DIAG:WALK_BYTE_ALL_ON_START;");
+      }
+    }
+  } else {
+    if (now - diagWalkLastTs >= BYTE_MS) {
+      diagWalkLastTs = now;
+      memset(desiredLedState, 0, LED_TOTAL_BYTES+1);
+      if (diagWalkByte <= LED_TOTAL_BYTES) {
+        desiredLedState[diagWalkByte] = 0xFF;
+        applyLEDOutputs();
+        Serial.print("DIAG:ALL_ON LED"); Serial.print(diagWalkByte+1);
+        Serial.println(" = 11111111");
+      } else { applyLEDOutputs(); }
+      diagWalkByte++;
+      if (diagWalkByte > LED_TOTAL_BYTES) {
+        ledClearAll();
+        diagStage = 0;
+        Serial.println("DIAG:LED_WALK_DONE;");
+      }
+    }
+  }
+}
+
 void diagRunMenu() {
   unsigned long now=millis();readAllInputs();
   if(!menuInitialized){menuInitialized=true;menuIndex=0;lastMenuActivityTs=now;Serial.println("DIAG:MENU;");ledClearAll();return;}
-  if((now-lastMenuActivityTs)>=MENU_INACTIVITY_MS){bootState=BOOT_RUNNING;menuInitialized=false;ledClearAll();Serial.println("DIAG:EXIT_TIMEOUT;");return;}
-  static unsigned long lbTs=0;static uint8_t bp=0;
-  if(now-lbTs>=100){lbTs=now;if(bp<6){if(bp%2==0)ledSetAll(0xFF);else ledClearAll();bp++;}else if(bp<12){ledClearAll();bp++;}else bp=0;}
+  if(diagStage==0&&(now-lastMenuActivityTs)>=MENU_INACTIVITY_MS){bootState=BOOT_RUNNING;menuInitialized=false;ledClearAll();Serial.println("DIAG:EXIT_TIMEOUT;");return;}
   if(memcmp(inputState,lastInputState,IN_TOTAL_BYTES)!=0){lastMenuActivityTs=now;
     if(inputState[0]!=lastInputState[0]){uint8_t ch=inputState[0]^lastInputState[0];
       if(ch&0x01&&(inputState[0]&0x01)){menuIndex=(menuIndex+1)%4;memcpy(lastInputState,inputState,IN_TOTAL_BYTES);Serial.print("DIAG:MENU:");Serial.println(menuIndex);
-        if(menuIndex==0){Serial.println("DIAG:LED_WALK;");diagStage=1;diagStartTime=now;}
-        else if(menuIndex==1){Serial.println("DIAG:INPUTS;");for(uint8_t i=0;i<IN_TOTAL_BYTES;i++){char b8[9];bin8(b8,inputState[i]);Serial.print("IN");Serial.print(i);Serial.print("=");Serial.print(b8);Serial.print(";");}Serial.println();}
+        if(menuIndex==0){Serial.println("DIAG:LED_WALK;");diagStage=1;diagStartTime=now;diagWalkPhase=0;diagWalkByte=0;diagWalkLastTs=now;ledClearAll();}
+        else if(menuIndex==1){Serial.println("DIAG:INPUTS;");for(uint8_t i=0;i<IN_TOTAL_BYTES;i++){char b8[9];bin8(b8,inputState[i]);Serial.print("IN");Serial.print(i+1);Serial.print("=");Serial.print(b8);Serial.print(";");}Serial.println();}
         else if(menuIndex==2){Serial.print("HEALTH:UPTIME=");Serial.print(millis()/1000);Serial.print("s;LASTERR=0;FREEMEM=");extern int __heap_start,*__brkval;int vv;Serial.print((int)&vv-(__brkval==0?(int)&__heap_start:(int)__brkval));Serial.print(";VERSION=");Serial.print(FW_VERSION);Serial.println(";");}
         else if(menuIndex==3){bootState=BOOT_RUNNING;menuInitialized=false;ledClearAll();Serial.println("DIAG:EXIT;");}
       }
     }
   }
-  if(diagStage==1){int li=((now-diagStartTime)/200)%((LED_TOTAL_BYTES+1)*8);ledClearAll();uint8_t bi=li/8;desiredLedState[bi]=1<<(li%8);applyLEDOutputs();}
+  if(diagStage==1){diagLedWalkStep(now);}
+  if(diagStage==3){diagShowStep(now);}
+}
+
+// ============================================================================
+// DIAG SHOW – Animation sequence for demo / video
+// ============================================================================
+void diagShowStep(unsigned long now) {
+  const uint16_t totalBits = (uint16_t)(LED_TOTAL_BYTES+1) * 8;
+  lastMenuActivityTs=now;
+
+  if (showPhase == 0) {
+    // ---- Phase 0: Knight Rider sweep (left→right→left, 1 pass) ----
+    const unsigned long KR_MS = 30;
+    if (now - showLastTs >= KR_MS) {
+      showLastTs = now;
+      int pos = showStep;
+      if (pos >= totalBits) { pos = totalBits*2 - 2 - showStep; }
+      if (showStep >= totalBits*2 - 1) {
+        showPhase=1; showStep=0; showLastTs=now;
+        ledClearAll();
+        Serial.println("DIAG:SHOW_CASCADE;");
+        return;
+      }
+      memset(desiredLedState, 0, LED_TOTAL_BYTES+1);
+      uint8_t bi = pos / 8;
+      desiredLedState[bi] = 1 << (pos % 8);
+      applyLEDOutputs();
+      showStep++;
+    }
+  } else if (showPhase == 1) {
+    // ---- Phase 1: Cascade fill ----
+    const unsigned long CAS_MS = 100;
+    if (now - showLastTs >= CAS_MS) {
+      showLastTs = now;
+      int totalBytes = LED_TOTAL_BYTES+1;
+      if (showStep < totalBytes) {
+        desiredLedState[showStep] = 0xFF;
+        applyLEDOutputs();
+      } else if (showStep < totalBytes*2) {
+        int bi = showStep - totalBytes;
+        desiredLedState[bi] = 0x00;
+        applyLEDOutputs();
+      } else {
+        showPhase=2; showStep=0; showLastTs=now;
+        ledClearAll();
+        Serial.println("DIAG:SHOW_BREATHE;");
+        return;
+      }
+      showStep++;
+    }
+  } else if (showPhase == 2) {
+    // ---- Phase 2: "Breathing" – accelerating pulse ----
+    if (now - showLastTs >= (unsigned long)(220 - showStep*2)) {
+      showLastTs = now;
+      if (showStep >= 100) {
+        showPhase=3; showStep=0; showLastTs=now;
+        ledSetAll(0xFF);
+        Serial.println("DIAG:SHOW_FINALE;");
+        return;
+      }
+      if (showStep & 1) ledClearAll(); else ledSetAll(0xFF);
+      showStep++;
+    }
+  } else if (showPhase == 3) {
+    // ---- Phase 3: All ON → hold 2.5s → done or repeat ----
+    if (now - showLastTs >= 2500) {
+      showRepeat--;
+      if (showRepeat > 0) {
+        showPhase=0; showStep=0; showLastTs=now;
+        ledClearAll();
+        Serial.print("DIAG:SHOW_REPEAT ");Serial.print(showRepeat);Serial.println(";");
+      } else {
+        ledClearAll();
+        diagStage = 0;
+        showPhase = 0; showStep = 0; showRepeat = 1;
+        Serial.println("DIAG:SHOW_DONE;");
+      }
+    }
+  }
 }
 
 bool diagCheckCombo() {
@@ -383,7 +532,7 @@ void loadHWInfo() {
 // SETUP
 // ============================================================================
 void setup() {
-  wdt_disable();Serial.begin(115200);
+  wdt_disable();Serial.begin(115200);Serial.flush();delay(50);
   pinMode(inClk_AD,OUTPUT);pinMode(inLatch_AD,OUTPUT);pinMode(inData_AD,INPUT);
   pinMode(inClk_LT,OUTPUT);pinMode(inLatch_LT,OUTPUT);pinMode(inData_LT,INPUT);
   pinMode(inClk_CA,OUTPUT);pinMode(inLatch_CA,OUTPUT);pinMode(inData_CA,INPUT);
@@ -407,7 +556,7 @@ void setup() {
 // ============================================================================
 void loop() {
   unsigned long now=millis();
-  if(bootState==BOOT_DIAG_MENU){diagRunMenu();return;}
+  if(bootState==BOOT_DIAG_MENU){processSerialTokensFromHost();diagRunMenu();return;}
   if(bootState==BOOT_DIAG_TEST){/*no full seq for secondary*/ bootState=BOOT_RUNNING;return;}
   if(now<pauseUntil)return;
   processSerialTokensFromHost();
@@ -416,6 +565,6 @@ void loop() {
   bool inCh=memcmp(inputState,lastInputState,IN_TOTAL_BYTES)!=0;
   if(inCh&&(now-lastDebounceTs)>=CFG_BUTTON_DEBOUNCE){lastDebounceTs=now;memcpy(lastInputState,inputState,IN_TOTAL_BYTES);sendStatusImmediate();}
   diagCheckCombo();
-  if(analogChanged()){for(uint8_t i=0;i<ANALOG_COUNT;i++){Serial.print("POT");Serial.print(i);Serial.print(":");Serial.print(analogValues[i]);Serial.print(";");}Serial.println();}
+  if(analogChanged()){for(uint8_t i=0;i<ANALOG_COUNT;i++){Serial.print("POT");Serial.print(i+1);Serial.print(":");Serial.print(analogValues[i]);Serial.print(";");}Serial.println();}
   if(forceSendNext)sendStatusImmediate();
 }

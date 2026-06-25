@@ -1,0 +1,29 @@
+{
+  "files.associations": {
+    "*.ino": "cpp",
+    "*.INO": "cpp"
+  },
+  "C_Cpp.default.configurationProvider": "ms-vscode.cpptools",
+  "C_Cpp.default.intelliSenseMode": "windows-gcc-x86",
+  "C_Cpp.default.compilerPath": "C:\\Users\\MQuatember\\AppData\\Local\\Arduino15\\packages\\arduino\\tools\\avr-gcc\\7.3.0-atmel3.6.1-arduino7\\bin\\avr-g++",
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/source/**",
+    "C:\\Users\\MQuatember\\AppData\\Local\\Arduino15\\packages\\arduino\\hardware\\avr\\1.8.8\\cores\\arduino",
+    "C:\\Users\\MQuatember\\AppData\\Local\\Arduino15\\packages\\arduino\\hardware\\avr\\1.8.8\\variants\\micro"
+  ],
+  "C_Cpp.default.defines": [
+    "F_CPU=16000000L",
+    "ARDUINO=10607",
+    "ARDUINO_AVR_MICRO",
+    "ARDUINO_ARCH_AVR",
+    "USBCON"
+  ],
+  "C_Cpp.default.forcedInclude": ["Arduino.h"],
+  "C_Cpp.default.cStandard": "c11",
+  "C_Cpp.default.cppStandard": "gnu++11",
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "chat.tools.terminal.autoApprove": {
+    "&": true
+  }
+}
