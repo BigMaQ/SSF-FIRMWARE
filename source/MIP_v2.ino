@@ -74,8 +74,8 @@ const int analogPins[] = { A0, A1, A2, A3, A4, A5 };
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "MIP, v1.5 MAQ";
-const char FW_VERSION[] = "1.5";
+const char* PANEL_IDENT = "MIP, v1.2 MAQ";
+const char FW_VERSION[] = "1.2";
 const char PANEL_SN_PREFIX[] = "MIP-";
 bool identSentOnStart = false;
 

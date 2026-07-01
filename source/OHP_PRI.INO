@@ -16,8 +16,8 @@ const int inClk_FI = 19; const int inLatch_FI = 18; const int inData_FI = 14; co
 const int inClk_EM = 25; const int inLatch_EM = 24; const int inData_EM = 26; const uint8_t IN_CNT_EM = 4;
 // ELEC_IS: CLOCK D36, LATCH D35, DATA D37, AMOUNT 2
 const int inClk_EL = 36; const int inLatch_EL = 35; const int inData_EL = 37; const uint8_t IN_CNT_EL = 2;
-// AC_IS: CLOCK D44, LATCH D41, DATA D43, AMOUNT 2
-const int inClk_AC = 44; const int inLatch_AC = 41; const int inData_AC = 43; const uint8_t IN_CNT_AC = 2;
+// AC_IS: CLOCK D42, LATCH D41, DATA D43, AMOUNT 2
+const int inClk_AC = 42; const int inLatch_AC = 41; const int inData_AC = 43; const uint8_t IN_CNT_AC = 2;
 
 #define IN_SHIFTER_BYTES 11  // 2+1+4+2+2
 #define IN_SINGLE_COUNT   0   // D9/D10/D20/D23 are direct LEDs now, not inputs
@@ -34,8 +34,8 @@ const int ledClk_FI  = 16; const int ledLatch_FI  = 21; const int ledData_FI  = 
 const int ledClk_EM  = 28; const int ledLatch_EM  = 27; const int ledData_EM  = 29; const uint8_t LED_CNT_EM = 4;
 // ELEC_LEDDRV:     CLK D39, LATCH D38, DATA D40, AMOUNT 3
 const int ledClk_EL  = 39; const int ledLatch_EL  = 38; const int ledData_EL  = 40; const uint8_t LED_CNT_EL = 3;
-// AC_LEDDRV:       CLK D45, LATCH D46, DATA D48, AMOUNT 2
-const int ledClk_AC  = 45; const int ledLatch_AC  = 46; const int ledData_AC  = 48; const uint8_t LED_CNT_AC = 2;
+// AC_LEDDRV:       CLK D45, LATCH D44, DATA D46, AMOUNT 2
+const int ledClk_AC  = 45; const int ledLatch_AC  = 44; const int ledData_AC  = 46; const uint8_t LED_CNT_AC = 2;
 
 #define LED_TOTAL_BYTES 15  // 14 shifter bytes + 1 direct LED byte (LED14)
 
@@ -263,6 +263,38 @@ void dspSetVal(int dev, uint8_t digitOfs, int16_t v, bool blank0) {
   // Write 3 digits right-aligned: buf[2]→digitOfs+2, buf[1]→digitOfs+1, buf[0]→digitOfs+0
   for(int d=0;d<3;d++) lc.setRow(dev, digitOfs+(2-d), charTo7Seg(buf[d]));
 }
+// String-based display setter with DP support (like RMP updateDisplay).
+// txt = raw string (e.g. "12.3"), digitOfs = row offset for the 3-digit group.
+// DP is folded into the digit to its LEFT: "12.3" uses 3 positions: '1' '2.' '3'.
+static int dspEffLen(const char* s) { int cnt=0; for(int i=0;s[i];i++) if(s[i]!='.')cnt++; return cnt; }
+void dspSetValStr(int dev, uint8_t digitOfs, const char* txt) {
+  // Clear all 3 digits
+  for(int d=0;d<3;d++) lc.setRow(dev, digitOfs+d, 0);
+  if (!txt || txt[0]==0) return;
+  int elen = dspEffLen(txt);
+  if (elen==0) return;
+  // Build right-aligned segment patterns, DP folded into the left neighbour.
+  // Walk through txt LEFT-TO-RIGHT, skipping '.' as a modifier that sets DP
+  // on the digit that PRECEDES it in the string.
+  uint8_t pat[3] = {0,0,0};
+  int srcLen = (int)strlen(txt);
+  int srcPos = 0;
+  int elenRemaining = elen;
+  int padLeft = (3 > elenRemaining) ? (3 - elenRemaining) : 0;  // blank positions on the left
+  // Fill blank positions
+  for (int d = 0; d < padLeft; d++) pat[d] = 0;
+  int d = padLeft;
+  while (d < 3 && srcPos < srcLen) {
+    char c = txt[srcPos];
+    if (c == '.') { srcPos++; continue; }  // DP handled in next iteration
+    uint8_t p = charTo7Seg(c);
+    // Check if '.' follows this character → set DP on this digit
+    if (srcPos + 1 < srcLen && txt[srcPos + 1] == '.') p |= 0b10000000;
+    pat[d] = p;
+    srcPos++; d++;
+  }
+  for(int d=0;d<3;d++) lc.setRow(dev, digitOfs+(2-d), pat[d]);
+}
 void setDisplayBrightness(uint8_t b) { displayBrightness=constrain(b,0,15);
   lc.setIntensity(0, displayBrightness); }
 void initDisplays() {
@@ -398,8 +430,8 @@ void processIncomingLine(const char* line) {
       // STATE – silent, matching RMP behavior
       else if (strieq(kp,"STATE")) { hostOnline=(strcmp(val,"01")==0||strcmp(val,"1")==0); }
       // DSPx: DSP1=BAT1(digits 5,4,3), DSP2=BAT2(digits 2,1,0) – silent apply
-      else if (strieq(kp,"DSP1")) { int v=atoi_s(val); if(v<0||val[0]=='-')for(int d=3;d<6;d++)lc.setRow(0,d,0); else dspSetVal(0,3,v,false); }
-      else if (strieq(kp,"DSP2")) { int v=atoi_s(val); if(v<0||val[0]=='-')for(int d=0;d<3;d++)lc.setRow(0,d,0); else dspSetVal(0,0,v,false); }
+      else if (strieq(kp,"DSP1")) { int v=atoi_s(val); if(v<0||val[0]=='-')for(int d=3;d<6;d++)lc.setRow(0,d,0); else if(strchr(val,'.'))dspSetValStr(0,3,val); else dspSetVal(0,3,v,false); }
+      else if (strieq(kp,"DSP2")) { int v=atoi_s(val); if(v<0||val[0]=='-')for(int d=0;d<3;d++)lc.setRow(0,d,0); else if(strchr(val,'.'))dspSetValStr(0,0,val); else dspSetVal(0,0,v,false); }
       else if (strieq(kp,"ANN")) { annuBrightness=constrain(atoi_s(val),0,255); applyLEDOutputs(); }
       else if (strieq(kp,"BL"))  { backlBrightness=constrain(atoi_s(val),0,255); applyLEDOutputs(); }
       else if (strieq(kp,"DISP_BL")) { setDisplayBrightness(atoi_s(val)); }
