@@ -41,7 +41,11 @@ constexpr uint8_t inClk_EL  = 36;  constexpr uint8_t inLatch_EL = 35;  constexpr
 constexpr uint8_t inClk_AC  = 42;  constexpr uint8_t inLatch_AC = 41;  constexpr uint8_t inData_AC = 43;  constexpr uint8_t IN_CNT_AC = 2;
 
 constexpr uint8_t IN_SHIFTER_BYTES = 11;   // 2+1+4+2+2
-constexpr uint8_t IN_TOTAL_BYTES   = IN_SHIFTER_BYTES;
+constexpr uint8_t IN_SINGLE_COUNT  = 3;
+constexpr uint8_t IN_TOTAL_BYTES   = IN_SHIFTER_BYTES + 1;
+
+// FIRE Buttons (digital, active-low, Pull-Up): A13/A14/A15
+constexpr uint8_t SIN_PINS[IN_SINGLE_COUNT] = {A13, A14, A15};
 
 // ============================================================================
 // PIN DEFINITIONS – OUTPUT SHIFTER / TLC5916
@@ -79,16 +83,17 @@ constexpr uint8_t dspNumDev  = 1;
 // ============================================================================
 // PIN DEFINITIONS – ANALOG
 // ============================================================================
-constexpr uint8_t ANALOG_COUNT = 6;
-constexpr uint8_t ANA_PINS[ANALOG_COUNT] = {A9, A8, A10, A13, A14, A15};
-// A9=AC_FWD_Cabin, A8=AC_AFT_Cabin, A10=AC_Cockpit,
-// A13=FIRE_ENG1_AGENT1, A14=FIRE_ENG1_AGENT2, A15=FIRE_ENG1_TEST
+constexpr uint8_t ANALOG_COUNT = 3;
+constexpr uint8_t ANA_PINS[ANALOG_COUNT] = {A8, A9, A10};
+// A8=AC_AFT_Cabin, A9=AC_FWD_Cabin, A10=AC_Cockpit
+// A5 = Reserve (INOP / aktuell deaktiviert)
+// FIRE Buttons auf A13/A14/A15 werden NICHT als Analog-POT verarbeitet.
 
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char PANEL_IDENT[]     = "OHP_PRI, v1.2 MAQ";
-const char FW_VERSION[]      = "1.2";
+const char PANEL_IDENT[]     = "OHP_PRI, v1.3 MAQ";
+const char FW_VERSION[]      = "1.3";
 const char PANEL_SN_PREFIX[] = "OHP-";
 
 bool          identSentOnStart = false;
@@ -448,6 +453,13 @@ void readAllInputs() {
     readOneInGrp(inClk_EM, inLatch_EM, inData_EM, &inputState[bi], IN_CNT_EM); bi += IN_CNT_EM;
     readOneInGrp(inClk_EL, inLatch_EL, inData_EL, &inputState[bi], IN_CNT_EL); bi += IN_CNT_EL;
     readOneInGrp(inClk_AC, inLatch_AC, inData_AC, &inputState[bi], IN_CNT_AC);
+
+    // Direct Inputs im zusaetzlichen IN-Byte (Bit0=A13, Bit1=A14, Bit2=A15)
+    uint8_t s = 0;
+    for (uint8_t i = 0; i < IN_SINGLE_COUNT; i++) {
+        if (digitalRead(SIN_PINS[i]) == LOW) s |= (uint8_t)(1 << i);
+    }
+    inputState[IN_SHIFTER_BYTES] = s;
 }
 
 // ============================================================================
@@ -1195,6 +1207,9 @@ void setup() {
     pinMode(inClk_EM, OUTPUT); pinMode(inLatch_EM, OUTPUT); pinMode(inData_EM, INPUT);
     pinMode(inClk_EL, OUTPUT); pinMode(inLatch_EL, OUTPUT); pinMode(inData_EL, INPUT);
     pinMode(inClk_AC, OUTPUT); pinMode(inLatch_AC, OUTPUT); pinMode(inData_AC, INPUT);
+
+    // Direct Inputs (FIRE Buttons)
+    for (uint8_t i = 0; i < IN_SINGLE_COUNT; i++) pinMode(SIN_PINS[i], INPUT_PULLUP);
 
     // Direct LEDs (active-low, initial state: AUS = HIGH)
     for (uint8_t i = 0; i < DLED_COUNT; i++) {
