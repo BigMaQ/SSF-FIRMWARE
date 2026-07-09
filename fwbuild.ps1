@@ -16,9 +16,14 @@
     Nach erfolgreichem Build Git commit + push (mit Bestaetigung).
 .PARAMETER AddPanel
     Neue .INO-Dateien im Source-Ordner erkennen und zum Build-System hinzufuegen.
+.PARAMETER Rebuild
+    Alle Panels (oder eines mit -Panel) neu builden und bestehende HEX
+    mit gleicher Versionsnummer ueberschreiben (fuer Tests/Kleinigkeiten).
 .EXAMPLE
     .\fwbuild.ps1 -Build -Git         # Build + Git commit/push
     .\fwbuild.ps1 -Build -Panel ACP   # Nur ACP builden
+    .\fwbuild.ps1 -Rebuild             # Alles rebuilden (ueberschreibt)
+    .\fwbuild.ps1 -Rebuild -Panel RMP # Nur RMP rebuilden
     .\fwbuild.ps1 -CheckVersion        # Version-Check
     .\fwbuild.ps1 -Status              # Build-Status pruefen
     .\fwbuild.ps1                      # Diese Hilfe anzeigen
@@ -30,6 +35,7 @@ param(
     [switch]$Status,
     [switch]$Git,
     [switch]$AddPanel,
+    [switch]$Rebuild,
     [string]$Panel = ""
 )
 
@@ -234,7 +240,7 @@ function Add-NewPanel {
 }
 
 # No params -> show help
-if (-not $Build -and -not $CheckVersion -and -not $Status -and -not $AddPanel) {
+if (-not $Build -and -not $CheckVersion -and -not $Status -and -not $AddPanel -and -not $Rebuild) {
     Write-Host @"
 SSF Firmware Build Tool
 =======================
@@ -242,6 +248,8 @@ SSF Firmware Build Tool
   .\fwbuild.ps1 -Build              Build aller Panels
   .\fwbuild.ps1 -Build -Git         Build + Git commit/push
   .\fwbuild.ps1 -Build -Panel ACP   Nur ACP builden
+  .\fwbuild.ps1 -Rebuild             Alles rebuilden (ueberschreibt HEX)
+  .\fwbuild.ps1 -Rebuild -Panel RMP Nur RMP rebuilden
   .\fwbuild.ps1 -CheckVersion        Nur Versionen anzeigen
   .\fwbuild.ps1 -Status              Pruefen ob Builds ausstehen
                                      (Exit 0 = aktuell, 1 = Build noetig)
@@ -277,10 +285,10 @@ if ($CheckVersion) {
     exit 0
 }
 
-# BUILD (only with -Build flag)
-if (-not $Build) { exit 0 }
+# BUILD (with -Build or -Rebuild flag)
+if (-not $Build -and -not $Rebuild) { exit 0 }
 
-Write-Host "=== FIRMWARE BUILD ===" -ForegroundColor Cyan
+Write-Host "=== FIRMWARE $(if ($Rebuild) {'REBUILD'} else {'BUILD'}) ===" -ForegroundColor Cyan
 $need = Write-StatusTable $allStatus
 Write-Host ""
 
@@ -293,9 +301,10 @@ $built = 0; $failed = 0; $skipped = 0
 
 foreach ($p in $allStatus) {
     if ($p.InoVersion -eq "?") { Write-Host "  - $($p.Key): SKIP" -ForegroundColor DarkGray; $skipped++; continue }
-    if ($p.InoVersion -eq $p.HexVersion) { Write-Host "  + $($p.Key): v$($p.InoVersion) current" -ForegroundColor DarkGray; $skipped++; continue }
+    # Rebuild: always build | Build: only if version differs
+    if (-not $Rebuild -and $p.InoVersion -eq $p.HexVersion) { Write-Host "  + $($p.Key): v$($p.InoVersion) current" -ForegroundColor DarkGray; $skipped++; continue }
     
-    Write-Host "  >> $($p.Key): v$($p.InoVersion)..." -ForegroundColor Yellow
+    Write-Host "  >> $($p.Key): $(if ($Rebuild) {'REBUILD'} else {''}) v$($p.InoVersion)..." -ForegroundColor Yellow
     $buildDir = Join-Path $FirmwareDir "_build\$($p.Key)"
     $hexDir   = $p.HexDir
     $sketchFolder = Split-Path -Parent $p.InoFile

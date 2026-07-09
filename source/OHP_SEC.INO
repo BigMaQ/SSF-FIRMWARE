@@ -74,8 +74,8 @@ constexpr uint8_t ANA_PINS[ANALOG_COUNT] = {A5, A6, A7, A8};
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char PANEL_IDENT[]     = "OHP_SEC, v1.2 MAQ";
-const char FW_VERSION[]      = "1.2";
+const char PANEL_IDENT[]     = "OHP_SEC, v1.3 MAQ";
+const char FW_VERSION[]      = "1.3";
 const char PANEL_SN_PREFIX[] = "OHS-";
 
 bool          identSentOnStart = false;
@@ -86,8 +86,18 @@ char          CFG_SERIAL_NUMBER[10] = "";
 // LED STATE (Shifter + Single LEDs)
 // LED_TOTAL_BYTES Shifter-Bytes + 1 Byte fuer Single LEDs
 // ============================================================================
+// Backlight mask: which LED registers are controlled by BL instead of LEDx
+// OHP_SEC: LED1-8 are all backlight (indices 0-7), 0xFF mask each
+constexpr uint8_t BACKLIGHT_COUNT = 8;
+constexpr uint8_t BACKLIGHT_MASKS[BACKLIGHT_COUNT] = {
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF  // LED1-8 all backlight
+};
+
 uint8_t desiredLedState[LED_TOTAL_BYTES + 1] = {};
 uint8_t hwLedState[LED_TOTAL_BYTES + 1]      = {};
+
+uint8_t desiredBacklight = 0;  // Backlight brightness from BL command
+bool diagActive = false;       // Set true during DIAG to bypass backlight mask
 
 // ============================================================================
 // INPUT STATE
@@ -125,8 +135,10 @@ const char SETTINGS_PIN[] = "0815";
 // ============================================================================
 // BOOT / VERBINDUNGS-STATE
 // ============================================================================
-enum BootState : uint8_t { BOOT_INIT, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
+enum BootState : uint8_t { BOOT_INIT, BOOT_FADE, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
 BootState bootState = BOOT_INIT;
+unsigned long bootFadeStart = 0;
+constexpr unsigned long BOOT_FADE_DURATION_MS = 1500UL;
 
 bool hostOnline = false;
 
@@ -280,9 +292,30 @@ static void shiftOutOne(uint8_t clk, uint8_t latch, uint8_t data,
 }
 
 void applyLEDOutputs() {
+    // Build backlight byte: when backlight active, use desiredBacklight; else 0
+    // In DIAG mode, backlight registers use desiredLedState values as-is
+    uint8_t blByte = (diagActive || desiredBacklight > 0) ? desiredBacklight : 0x00;
+
     uint8_t bi = 0;
-    shiftOutOne(ledClk_B1, ledLatch_B1, ledData_B1, &desiredLedState[bi], LED_CNT_B1); bi += LED_CNT_B1;
-    shiftOutOne(ledClk_B2, ledLatch_B2, ledData_B2, &desiredLedState[bi], LED_CNT_B2); bi += LED_CNT_B2;
+    // B1 (LED1-4, indices 0-3): all backlight
+    {
+        uint8_t out[4];
+        for (uint8_t i = 0; i < LED_CNT_B1; i++) {
+            out[i] = diagActive ? desiredLedState[bi + i] : blByte;
+        }
+        shiftOutOne(ledClk_B1, ledLatch_B1, ledData_B1, out, LED_CNT_B1);
+        bi += LED_CNT_B1;
+    }
+    // B2 (LED5-8, indices 4-7): all backlight
+    {
+        uint8_t out[4];
+        for (uint8_t i = 0; i < LED_CNT_B2; i++) {
+            out[i] = diagActive ? desiredLedState[bi + i] : blByte;
+        }
+        shiftOutOne(ledClk_B2, ledLatch_B2, ledData_B2, out, LED_CNT_B2);
+        bi += LED_CNT_B2;
+    }
+    // AD, LT, CA (indices 8-16): free registers, no mask
     shiftOutOne(ledClk_AD, ledLatch_AD, ledData_AD, &desiredLedState[bi], LED_CNT_AD); bi += LED_CNT_AD;
     shiftOutOne(ledClk_LT, ledLatch_LT, ledData_LT, &desiredLedState[bi], LED_CNT_LT); bi += LED_CNT_LT;
     shiftOutOne(ledClk_CA, ledLatch_CA, ledData_CA, &desiredLedState[bi], LED_CNT_CA);
@@ -412,15 +445,15 @@ static void processToken(char* tok) {
     }
     if (strieq(tok, "EXIT")) {
         if (bootState == BOOT_DIAG_MENU) {
-            bootState = BOOT_RUNNING; menuInitialized = false; diagStage = 0;
-            ledClearAll(); Serial.println(F("DIAG:EXIT;"));
+            bootState = BOOT_RUNNING; diagActive = false; menuInitialized = false; diagStage = 0;
+                        ledClearAll(); Serial.println(F("DIAG:EXIT;"));
         } else {
             settingsEnabled = false; Serial.println(F("EXIT:OK ;"));
         }
         return;
     }
     if (strieq(tok, "DIAG") && bootState == BOOT_RUNNING) {
-        bootState = BOOT_DIAG_MENU; diagStartTime = millis(); diagStage = 0;
+        bootState = BOOT_DIAG_MENU; diagActive = true; diagStartTime = millis(); diagStage = 0;
         menuInitialized = false; ledClearAll(); Serial.println(F("DIAG:MENU;"));
         return;
     }
@@ -452,8 +485,8 @@ static void processToken(char* tok) {
                 Serial.print(F(";VERSION=")); Serial.println(FW_VERSION);
                 Serial.println(F("DIAG:ALL_OK;"));
             } else if (menuIndex == 3) {
-                bootState = BOOT_RUNNING; menuInitialized = false; diagStage = 0;
-                ledClearAll(); Serial.println(F("DIAG:EXIT;"));
+                bootState = BOOT_RUNNING; diagActive = false; menuInitialized = false; diagStage = 0;
+                            ledClearAll(); Serial.println(F("DIAG:EXIT;"));
             }
             return;
         }
@@ -518,8 +551,18 @@ static void processToken(char* tok) {
     if (stripre(kp, "LED")) {
         int16_t idx = atoi_s(kp + 3) - 1;
         if (idx >= 0 && idx <= (int16_t)LED_TOTAL_BYTES) {
-            desiredLedState[idx] = parseBin8(val); applyLEDOutputs();
+            uint8_t val8 = parseBin8(val);
+            // Apply backlight mask for LED1-8 (indices 0-7)
+            if (idx < BACKLIGHT_COUNT) val8 &= ~BACKLIGHT_MASKS[idx];
+            desiredLedState[idx] = val8; applyLEDOutputs();
         }
+        return;
+    }
+    if (strieq(kp, "BL") || strieq(kp, "BLT")) {
+        // Backlight brightness: 0=off, 1-255=on with dimming
+        // Writes brightness value to LED1-8 backlight registers
+        desiredBacklight = (uint8_t)constrain(atoi_s(val), 0, 255);
+        applyLEDOutputs();
         return;
     }
     if (strieq(kp, "STATE")) {
@@ -678,7 +721,7 @@ void diagRunMenu() {
         return;
     }
     if (diagStage == 0 && (now - lastMenuActivityTs) >= MENU_INACTIVITY_MS) {
-        bootState = BOOT_RUNNING; menuInitialized = false;
+        bootState = BOOT_RUNNING; diagActive = false; menuInitialized = false;
         ledClearAll(); Serial.println(F("DIAG:EXIT_TIMEOUT;"));
         return;
     }
@@ -709,7 +752,7 @@ void diagRunMenu() {
                     Serial.print((int)&vv - (__brkval == 0 ? (int)&__heap_start : (int)__brkval));
                     Serial.print(F(";VERSION=")); Serial.println(FW_VERSION);
                 } else if (menuIndex == 3) {
-                    bootState = BOOT_RUNNING; menuInitialized = false;
+                    bootState = BOOT_RUNNING; diagActive = false; menuInitialized = false;
                     ledClearAll(); Serial.println(F("DIAG:EXIT;"));
                 }
             }
@@ -929,7 +972,11 @@ void setup() {
     memcpy(lastInputState,   inputState,   IN_TOTAL_BYTES);
     memcpy(lastAnalogValues, analogValues, ANALOG_COUNT * sizeof(uint16_t));
 
-    bootState     = BOOT_RUNNING;
+    // Boot fade-in (non-blocking backlight)
+    bootState     = BOOT_FADE;
+    bootFadeStart = millis();
+    desiredBacklight = 0;
+    applyLEDOutputs();
     forceSendNext = true;
     rxHead = 0; rxTail = 0;   // Ring-Buffer sauber initialisieren
     maybeSendIdentStartup();
@@ -944,6 +991,20 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
+    // ── Boot backlight fade-in (non-blocking) ──
+    if (bootState == BOOT_FADE) {
+        unsigned long elapsed = now - bootFadeStart;
+        if (elapsed >= BOOT_FADE_DURATION_MS) {
+            desiredBacklight = 255;
+            applyLEDOutputs();
+            bootState = BOOT_RUNNING;
+        } else {
+            desiredBacklight = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+            applyLEDOutputs();
+            return;
+        }
+    }
+
     if (bootState == BOOT_DIAG_MENU) {
         processSerialTokensFromHost();
         diagRunMenu();
@@ -951,7 +1012,7 @@ void loop() {
     }
     if (bootState == BOOT_DIAG_TEST) {
         // Secondary hat keine vollstaendige Testsequenz
-        bootState = BOOT_RUNNING;
+        bootState = BOOT_RUNNING; diagActive = false;
         return;
     }
     if (now < pauseUntil) return;

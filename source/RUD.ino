@@ -33,8 +33,8 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.3 MAQ";
-const char  FW_VERSION[] = "1.3";
+const char* PANEL_IDENT = "RUD, v1.4 MAQ";
+const char  FW_VERSION[] = "1.4";
 const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
 
@@ -44,6 +44,11 @@ char CFG_SERIAL_NUMBER[10] = "";  // 8 hex chars + null
 // ============================================================================
 // DIAG MODE STATE
 // ============================================================================
+enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING };
+BootState bootState = BOOT_INIT;
+unsigned long bootFadeStart = 0;
+const unsigned long BOOT_FADE_DURATION_MS = 1500;
+
 enum DiagMode { DIAG_IDLE, DIAG_RUNNING };
 DiagMode diagMode = DIAG_IDLE;
 unsigned long diagStart = 0;
@@ -250,10 +255,18 @@ void initDisplay() {
 // ============================================================================
 // LED STATE (32 bits, 4 drivers)
 // ============================================================================
+// Backlight mask: which LED registers are controlled by BL instead of LEDx
+// RUD: LED2, LED3, LED4 are backlight (all 8 bits each); LED1 is free
+const uint8_t BACKLIGHT_MASK2 = 0b11111111;  // LED2 → all backlight
+const uint8_t BACKLIGHT_MASK3 = 0b11111111;  // LED3 → all backlight
+const uint8_t BACKLIGHT_MASK4 = 0b11111111;  // LED4 → all backlight
+
 uint32_t desiredLedState = 0;
 uint32_t hwLedState = 0;
 uint8_t desiredBacklight = 0;
 uint8_t desiredAnnun = 0;
+
+bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 void shiftOutLEDs(uint32_t bits) {
   digitalWrite(ledLatchPin, LOW);
@@ -265,10 +278,23 @@ void shiftOutLEDs(uint32_t bits) {
 }
 
 void applyLEDOutputs() {
-  shiftOutLEDs(desiredLedState);
-  analogWrite(backlightPwmPin, desiredBacklight);
+  // Combine free bits + backlight bits for LED2/3/4
+  // In DIAG mode, bypass mask — direct full 32-bit control
+  uint8_t blBits = (diagActive || desiredBacklight > 0) ? 0xFF : 0x00;
+  uint32_t output;
+  if (diagActive) {
+    output = desiredLedState;
+  } else {
+    uint8_t l2 = ((uint8_t)(desiredLedState >> 16) & ~BACKLIGHT_MASK2) | blBits;
+    uint8_t l3 = ((uint8_t)(desiredLedState >> 8) & ~BACKLIGHT_MASK3) | blBits;
+    uint8_t l4 = ((uint8_t)desiredLedState & ~BACKLIGHT_MASK4) | blBits;
+    output = (desiredLedState & 0xFF000000) | ((uint32_t)l2 << 16) | ((uint32_t)l3 << 8) | l4;
+  }
+  shiftOutLEDs(output);
+  // Inverted PWM: BL:0 = off, BL:255 = full brightness
+  analogWrite(backlightPwmPin, 255 - desiredBacklight);
   analogWrite(annunPwmPin, desiredAnnun);
-  hwLedState = desiredLedState;
+  hwLedState = output;
 }
 
 void setLEDState(uint32_t bits) {
@@ -357,6 +383,10 @@ void handleLEDToken(int idx, const String &val) {
   uint8_t byteVal = parseBin8(val);
   // LED1-LED4 map to bytes in MSB-first chain:
   // LED1 -> bits 24-31, LED2 -> bits 16-23, LED3 -> bits 8-15, LED4 -> bits 0-7
+  // Apply backlight masks: only non-backlight bits from LEDx commands
+  if (idx == 2) byteVal &= ~BACKLIGHT_MASK2;
+  else if (idx == 3) byteVal &= ~BACKLIGHT_MASK3;
+  else if (idx == 4) byteVal &= ~BACKLIGHT_MASK4;
   int shift = (4 - idx) * 8; // idx 1..4 -> shift 24,16,8,0
   desiredLedState &= ~(0xFFUL << shift);
   desiredLedState |= ((uint32_t)byteVal << shift);
@@ -514,70 +544,14 @@ void processSerial() {
 }
 
 // ============================================================================
-// BOOT SEQUENCE (short)
+// (Old boot sequence removed — replaced by BOOT_FADE)
 // ============================================================================
-unsigned long bootStart = 0;
-bool bootDone = false;
-enum BootState { BOOT_INIT, BOOT_INIT_SHOW, BOOT_COUNTDOWN, BOOT_COMPLETE };
-BootState bootSeq = BOOT_INIT;
-
-void runBoot() {
-  unsigned long e = millis() - bootStart;
-  
-  // Stage 1: Flash pattern (0-240ms)
-  if (e < 240) {
-    if (e < 120) {
-      desiredLedState = 0xAAAAAAAA; applyLEDOutputs();
-    } else {
-      desiredLedState = 0x55555555; applyLEDOutputs();
-    }
-  }
-  // Stage 2: Show firmware as "u1.0" (240-740ms)
-  else if (e < 740) {
-    // Build digits from CFG_PCB_VERSION (e.g., "PCB 1.0" -> "1.0")
-    String pcb = CFG_PCB_VERSION; pcb.trim();
-    int sp = pcb.indexOf(' ');
-    String digits = (sp >= 0 && sp < pcb.length()-1) ? pcb.substring(sp+1) : pcb;
-    // Compact to 4 chars: 'u', digit, '.', digit
-    String fwDisp = "u";
-    if (digits.length() >= 1) fwDisp += String(digits.charAt(0));
-    else fwDisp += "1";
-    fwDisp += ".";
-    if (digits.length() >= 3) fwDisp += String(digits.charAt(2));
-    else fwDisp += "0";
-    updateDisplay(fwDisp);
-  }
-  // Stage 3: Show "Id  " (740-1240ms)
-  else if (e < 1240) {
-    updateDisplay("Id  ");
-  }
-  // Stage 4: Show first 2 characters of ACID (e.g., "D-") (1240-1740ms)
-  else if (e < 1740) {
-    String reg = CFG_AIRCRAFT_REG;
-    String first2 = "D-";  // sensible fallback
-    if (reg.length() >= 2) first2 = reg.substring(0, 2);
-    else if (reg.length() == 1) first2 = reg + " ";
-    updateDisplay(first2);
-  }
-  // Stage 5: Show last 4 characters of ACID or fallback "A320" (1740-2240ms)
-  else if (e < 2240) {
-    String reg = CFG_AIRCRAFT_REG;
-    String last4 = (reg.length() >= 4) ? reg.substring(reg.length() - 4) : "A320";
-    updateDisplay(last4);
-  }
-  // Stage 6: Done
-  else {
-    desiredLedState = 0; applyLEDOutputs();
-    updateDisplay("    ");
-    lc.setIntensity(0, displayBrightness);  // Benutzer-Helligkeit wiederherstellen
-    bootDone = true;
-  }
-}
 
 // ============================================================================
 // DIAG MODE
 // ============================================================================
 void runDiag() {
+  diagActive = true;
   unsigned long e = millis() - diagStart;
   
   // Stage 1: LED Walk (0-3200ms) - walk through all 32 LEDs
@@ -617,6 +591,7 @@ void runDiag() {
   else {
     updateDisplay("    ");
     desiredLedState = 0; applyLEDOutputs();
+    diagActive = false;
     diagMode = DIAG_IDLE;
     Serial.println("DIAG:COMPLETE;");
   }
@@ -650,17 +625,32 @@ void setup() {
   // IDENT sofort senden – Panel muss ab Boot für Scans bereit sein
   sendIdentAndState();
 
-  bootStart = millis();
+  // Boot fade-in (non-blocking backlight)
+  bootState = BOOT_FADE;
+  bootFadeStart = millis();
+  desiredBacklight = 0;
+  applyLEDOutputs();
 }
 
 void loop() {
   unsigned long now = millis();
   
-  // ── Boot-Sequenz (non-blocking: Serial wird IMMER verarbeitet) ──
-  if (!bootDone) { runBoot(); }
+  // ── Boot backlight fade-in (non-blocking) ──
+  if (bootState == BOOT_FADE) {
+    unsigned long elapsed = now - bootFadeStart;
+    if (elapsed >= BOOT_FADE_DURATION_MS) {
+      desiredBacklight = 255;
+      applyLEDOutputs();
+      bootState = BOOT_RUNNING;
+    } else {
+      desiredBacklight = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
+      processSerial();
+      return;
+    }
+  }
   // Serial auch während Boot verarbeiten – Panel antwortet sofort auf VER/IDENT!
   processSerial();
-  if (!bootDone) return;  // Während Boot: nur Serial + Animation, keine Inputs
 
   if (diagMode == DIAG_RUNNING) { runDiag(); return; }
 

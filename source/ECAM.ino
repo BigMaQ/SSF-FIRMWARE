@@ -21,8 +21,8 @@ const int pot1Pin       = A9;
 const int pot2Pin       = A10;
 
 // --- Panel identification ---
-const char* PANEL_IDENT = "ECAM, v1.2 MAQ";
-const char  FW_VERSION[] = "1.2";
+const char* PANEL_IDENT = "ECAM, v1.3 MAQ";
+const char  FW_VERSION[] = "1.3";
 const char  PANEL_SN_PREFIX[] = "ECAM-";
 bool identSentOnStart   = false;
 unsigned long pauseUntil = 0;
@@ -44,12 +44,19 @@ const char* HWREV_PASSWORD = "ACP-HW-SET";
 uint8_t hwRevision = 1;
 
 // --- LED state ---
-uint8_t desiredLed1 = 0x00;
-uint8_t desiredLed2 = 0x00;
-uint8_t desiredLed3 = 0x00;
-uint8_t desiredLed4 = 0x00;
+// Backlight mask: which LED registers are controlled by BL instead of LEDx
+// ECAM: LED2 and LED3 are backlight (all 8 bits each)
+const uint8_t BACKLIGHT_MASK2 = 0b11111111;  // LED2 → all backlight
+const uint8_t BACKLIGHT_MASK3 = 0b11111111;  // LED3 → all backlight
+
+uint8_t desiredLed1 = 0x00;  // LED1 free (no backlight mask)
+uint8_t desiredLed2 = 0x00;  // LED2 free bits (non-backlight)
+uint8_t desiredLed3 = 0x00;  // LED3 free bits (non-backlight)
+uint8_t desiredLed4 = 0x00;  // LED4 free (no backlight mask)
 uint8_t desiredBlLevel = 0;
 uint8_t desiredAnLevel = 0;
+
+bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 // --- Universal Parameters ---
 int SMO_THRESHOLD = 10;
@@ -97,11 +104,11 @@ unsigned long comboStartTime = 0;
 int comboStage = 0;
 bool forceSendNext = false;
 
-// --- Non-blocking Boot ---
-uint8_t  bootPhase = 0;
-unsigned long bootPhaseStart = 0;
-bool bootComplete = false;
-const unsigned long BOOT_PHASE_MS = 200;
+// --- Boot state ---
+enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING };
+BootState bootState = BOOT_INIT;
+unsigned long bootFadeStart = 0;
+const unsigned long BOOT_FADE_DURATION_MS = 1500;
 
 // --- Serial Parser ---
 const int SERIAL_BUF_SIZE = 128;
@@ -148,8 +155,15 @@ void shiftOutLEDs(uint8_t l1, uint8_t l2, uint8_t l3, uint8_t l4) {
 }
 
 void applyLEDOutputs() {
-  shiftOutLEDs(desiredLed1, desiredLed2, desiredLed3, desiredLed4);
-  analogWrite(backlightPWM, desiredBlLevel);
+  // Combine free bits + backlight bits for LED2 and LED3
+  // In DIAG mode, bypass mask — direct full 8-bit control
+  uint8_t backlightBits = (diagActive || desiredBlLevel > 0) ? 0xFF : 0x00;
+  uint8_t l2 = diagActive ? desiredLed2 : ((desiredLed2 & ~BACKLIGHT_MASK2) | backlightBits);
+  uint8_t l3 = diagActive ? desiredLed3 : ((desiredLed3 & ~BACKLIGHT_MASK3) | backlightBits);
+
+  shiftOutLEDs(desiredLed1, l2, l3, desiredLed4);
+  // Inverted PWM: BL:0 = off, BL:255 = full brightness
+  analogWrite(backlightPWM, 255 - desiredBlLevel);
   analogWrite(annunPWM, desiredAnLevel);
 }
 
@@ -288,6 +302,7 @@ void sendIdentAndState() {
 // ============================================================================
 
 void runDiag() {
+  diagActive = true;
   Serial.println("DIAG START");
 
   // 1) LED WALK (32 LEDs)
@@ -311,6 +326,7 @@ void runDiag() {
 
   // 4) Alles aus
   setLEDState(0x00, 0x00, 0x00, 0x00, 0, 0, true);
+  diagActive = false;
 
   Serial.println("DIAG END");
 }
@@ -321,8 +337,8 @@ void runDiag() {
 
 void handleKeyValueToken(const char* key, const char* val) {
   if (strcasecmp(key, "LED1") == 0) setLEDState(parseBin8(val), desiredLed2, desiredLed3, desiredLed4, desiredBlLevel, desiredAnLevel);
-  else if (strcasecmp(key, "LED2") == 0) setLEDState(desiredLed1, parseBin8(val), desiredLed3, desiredLed4, desiredBlLevel, desiredAnLevel);
-  else if (strcasecmp(key, "LED3") == 0) setLEDState(desiredLed1, desiredLed2, parseBin8(val), desiredLed4, desiredBlLevel, desiredAnLevel);
+  else if (strcasecmp(key, "LED2") == 0) setLEDState(desiredLed1, parseBin8(val) & ~BACKLIGHT_MASK2, desiredLed3, desiredLed4, desiredBlLevel, desiredAnLevel);
+  else if (strcasecmp(key, "LED3") == 0) setLEDState(desiredLed1, desiredLed2, parseBin8(val) & ~BACKLIGHT_MASK3, desiredLed4, desiredBlLevel, desiredAnLevel);
   else if (strcasecmp(key, "LED4") == 0) setLEDState(desiredLed1, desiredLed2, desiredLed3, parseBin8(val), desiredBlLevel, desiredAnLevel);
 
   else if (strcasecmp(key, "BL") == 0) {
@@ -491,9 +507,11 @@ void setup() {
     pot2Buffer[i] = 0;
   }
 
-  // Boot-Sequenz starten (non-blocking, wird in loop() abgearbeitet)
-  bootPhase = 0;
-  bootPhaseStart = millis();
+  // Boot fade-in (non-blocking backlight)
+  bootState = BOOT_FADE;
+  bootFadeStart = millis();
+  desiredBlLevel = 0;
+  applyLEDOutputs();
 
   // IDENT sofort senden – kein delay, Panel muss ab Boot für Scans bereit sein
   sendIdentAndState();
@@ -511,25 +529,19 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── Non-blocking Boot-Sequenz (parallel, Serial wird NICHT blockiert) ──
-  if (!bootComplete) {
-    if (now - bootPhaseStart >= BOOT_PHASE_MS) {
-      bootPhaseStart = now;
-      switch (bootPhase) {
-        case 0: desiredLed1 = 0xAA; desiredLed2 = 0xAA; desiredLed3 = 0xAA; desiredLed4 = 0xAA;
-                desiredBlLevel = 200; desiredAnLevel = 200; applyLEDOutputs(); break;
-        case 1: desiredLed1 = 0x55; desiredLed2 = 0x55; desiredLed3 = 0x55; desiredLed4 = 0x55;
-                desiredBlLevel = 200; desiredAnLevel = 200; applyLEDOutputs(); break;
-        case 2: desiredLed1 = 0xFF; desiredLed2 = 0xFF; desiredLed3 = 0xFF; desiredLed4 = 0xFF;
-                desiredBlLevel = 0;   desiredAnLevel = 0;   applyLEDOutputs(); break;
-        case 3: desiredLed1 = 0x00; desiredLed2 = 0x00; desiredLed3 = 0x00; desiredLed4 = 0x00;
-                desiredBlLevel = 0;   desiredAnLevel = 0;   applyLEDOutputs(); break;
-        case 4: bootComplete = true; break;
-      }
-      bootPhase++;
+  // ── Boot backlight fade-in (non-blocking) ──
+  if (bootState == BOOT_FADE) {
+    unsigned long elapsed = now - bootFadeStart;
+    if (elapsed >= BOOT_FADE_DURATION_MS) {
+      desiredBlLevel = 255;
+      applyLEDOutputs();
+      bootState = BOOT_RUNNING;
+    } else {
+      desiredBlLevel = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
+      processSerialInput();
+      return;
     }
-    processSerialInput();  // Serial auch während Boot verarbeiten
-    return;                // Noch keine Inputs/Status senden
   }
 
   if (now < pauseUntil) return;

@@ -36,8 +36,8 @@ const int PIN_POT_PED = A2;  // FLT_LGHT_PED
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "CPT_DOOR, v1.0 MAQ";
-const char  FW_VERSION[] = "1.0";
+const char* PANEL_IDENT = "CPT_DOOR, v1.1 MAQ";
+const char  FW_VERSION[] = "1.1";
 const char  PANEL_SN_PREFIX[] = "DOOR-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -51,21 +51,27 @@ char CFG_PCB_VERSION[9] = "PCB 1.0";
 bool settingsEnabled = false;
 const char SETTINGS_PIN[] = "0815";
 
-// Boot-Sequenz (non-blocking)
-uint8_t  bootPhase = 0;
-unsigned long bootPhaseStart = 0;
-const unsigned long BOOT_PHASE_MS = 150;
-bool bootComplete = false;
+// Boot state
+enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING };
+BootState bootState = BOOT_INIT;
+unsigned long bootFadeStart = 0;
+const unsigned long BOOT_FADE_DURATION_MS = 1500;
 
 // ============================================================================
 // LED STATE
 // ============================================================================
-uint8_t desiredLed1 = 0x00;   // LED1 = Backlight (8 bits via shift register)
+// Backlight mask: which LED1 bits are controlled by BL/BLT instead of LED1 command
+// CPT_DOOR: bits 0-5 = backlight (6 LEDs), bits 6-7 = free (direct LED1 control)
+const uint8_t BACKLIGHT_MASK = 0b00111111;  // bits 0-5 → backlight
+
+uint8_t desiredLed1 = 0x00;   // LED1 free bits only (non-backlight, via shift register)
 uint8_t desiredLed2 = 0x00;   // LED2 = Direct LEDs (bit0=DOOR_FLT, bit1=DOOR_OPEN)
 uint8_t hwLed1 = 0x00;
 uint8_t hwLed2 = 0x00;
 uint8_t desiredBlLevel = 0;
 uint8_t hwBlLevel = 0;
+
+bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 // ============================================================================
 // INPUT / POTI STATE
@@ -127,11 +133,18 @@ void shiftOutLEDs(uint8_t bits) {
 }
 
 void applyLEDOutputs() {
-  shiftOutLEDs(desiredLed1);
+  // Combine free bits (from LED1) + backlight bits (from BL)
+  // In DIAG mode, bypass mask — direct full 8-bit control
+  uint8_t backlightBits = (diagActive || desiredBlLevel > 0) ? BACKLIGHT_MASK : 0x00;
+  uint8_t freeBits = diagActive ? desiredLed1 : (desiredLed1 & ~BACKLIGHT_MASK);
+  uint8_t output = freeBits | backlightBits;
+
+  shiftOutLEDs(output);
   digitalWrite(PIN_DOOR_FLT, (desiredLed2 & 0x01) ? HIGH : LOW);
   digitalWrite(PIN_DOOR_OPEN, (desiredLed2 & 0x02) ? HIGH : LOW);
-  analogWrite(PIN_BACKLIGHT_PWM, desiredBlLevel);
-  hwLed1 = desiredLed1;
+  // Inverted PWM: BL:0 = off, BL:255 = full brightness
+  analogWrite(PIN_BACKLIGHT_PWM, 255 - desiredBlLevel);
+  hwLed1 = output;
   hwLed2 = desiredLed2;
   hwBlLevel = desiredBlLevel;
 }
@@ -265,7 +278,8 @@ void processIncomingLine(const String &line) {
     String val = token.substring(colon + 1); val.trim();
 
     if (key.equalsIgnoreCase("LED1")) {
-      desiredLed1 = parseBin8(val);
+      // Only apply free (non-backlight) bits — backlight bits come from BL
+      desiredLed1 = parseBin8(val) & ~BACKLIGHT_MASK;
       applyLEDOutputs();
     }
     else if (key.equalsIgnoreCase("LED2")) {
@@ -411,9 +425,11 @@ void setup() {
   // Load config
   loadHWInfo();
 
-  // Boot-Sequenz starten (non-blocking, wird in loop() abgearbeitet)
-  bootPhase = 0;
-  bootPhaseStart = millis();
+  // Boot fade-in (non-blocking backlight)
+  bootState = BOOT_FADE;
+  bootFadeStart = millis();
+  desiredBlLevel = 0;
+  applyLEDOutputs();
 
   // IDENT sofort senden – kein delay, Panel muss ab Boot für Scans bereit sein
   sendIdentAndState();
@@ -426,22 +442,19 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── Non-blocking Boot-Sequenz (läuft parallel, Serial wird NICHT blockiert) ──
-  if (!bootComplete) {
-    if (now - bootPhaseStart >= BOOT_PHASE_MS) {
-      bootPhaseStart = now;
-      switch (bootPhase) {
-        case 0: desiredLed1 = 0xAA; desiredLed2 = 0x03; desiredBlLevel = 200; applyLEDOutputs(); break;
-        case 1: desiredLed1 = 0x55; desiredLed2 = 0x03; desiredBlLevel = 200; applyLEDOutputs(); break;
-        case 2: desiredLed1 = 0xFF; desiredLed2 = 0x03; desiredBlLevel = 0;   applyLEDOutputs(); break;
-        case 3: desiredLed1 = 0x00; desiredLed2 = 0x00; desiredBlLevel = 0;   applyLEDOutputs(); break;
-        case 4: bootComplete = true; break;  // Fertig, IDENT schon gesendet
-      }
-      bootPhase++;
+  // ── Boot backlight fade-in (non-blocking) ──
+  if (bootState == BOOT_FADE) {
+    unsigned long elapsed = now - bootFadeStart;
+    if (elapsed >= BOOT_FADE_DURATION_MS) {
+      desiredBlLevel = 255;
+      applyLEDOutputs();
+      bootState = BOOT_RUNNING;
+    } else {
+      desiredBlLevel = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
+      processSerialTokensFromHost();
+      return;
     }
-    // Serial immer verarbeiten – auch während Boot!
-    processSerialTokensFromHost();
-    return;  // Während Boot-Phase nur Serial + LEDs, noch keine Inputs senden
   }
 
   if (now < pauseUntil) return;

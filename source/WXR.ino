@@ -111,9 +111,10 @@ unsigned long lastDebounceTs = 0;
 // ============================================================================
 // BOOT / CONNECTION STATE
 // ============================================================================
-enum BootState { BOOT_INIT, BOOT_RUNNING, BOOT_DIAG };
+enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING, BOOT_DIAG };
 BootState bootState = BOOT_INIT;
-unsigned long bootSequenceStart = 0;
+unsigned long bootFadeStart = 0;
+const unsigned long BOOT_FADE_DURATION_MS = 1500;  // Backlight fade-in duration
 bool bootMessageShown = false;
 unsigned long bootMessageStart = 0;
 const unsigned long BOOT_MESSAGE_DURATION_MS = 5000;
@@ -872,8 +873,11 @@ void setup() {
   bootMessageShown = true;
   bootMessageStart = millis();
 
-  // Go straight to running
-  bootState = BOOT_RUNNING;
+  // Start with fade-in animation (non-blocking)
+  bootState = BOOT_FADE;
+  bootFadeStart = millis();
+  desiredBacklight = 0;
+  applyLEDOutputs();
   forceSendNext = true;
   maybeSendIdentStartup();
 }
@@ -888,6 +892,21 @@ void loop() {
   if (bootState == BOOT_DIAG) {
     runDiagSequence();
     return;
+  }
+
+  // Non-blocking backlight fade-in on boot
+  if (bootState == BOOT_FADE) {
+    unsigned long elapsed = now - bootFadeStart;
+    if (elapsed >= BOOT_FADE_DURATION_MS) {
+      desiredBacklight = 255;
+      applyLEDOutputs();
+      bootState = BOOT_RUNNING;
+    } else {
+      // Linear ramp: 0 → 255 over fade duration
+      desiredBacklight = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
+      return;  // Skip main loop during fade
+    }
   }
 
   processSerialTokensFromHost();

@@ -50,8 +50,8 @@ const int pinStby      = A0;  // STBY   → IN3 bit 6
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "ATC, v1.2 MAQ";
-const char  FW_VERSION[] = "1.2";
+const char* PANEL_IDENT = "ATC, v1.3 MAQ";
+const char  FW_VERSION[] = "1.3";
 const char  PANEL_SN_PREFIX[] = "ATC-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -70,7 +70,11 @@ const int DISP_DEVICE = 0;
 // ============================================================================
 // LED STATE (desired + hardware cache)
 // ============================================================================
-uint8_t desiredBacklight = 0x00;   // 8 bits for backlight shift register
+// Backlight mask: which LED1 bits are controlled by BL/BLT instead of LED1 command
+// ATC: bits 0-5 = backlight (6 LEDs), bits 6-7 = free (direct LED1 control)
+const uint8_t BACKLIGHT_MASK = 0b00111111;  // bits 0-5 → backlight
+
+uint8_t desiredBacklight = 0x00;   // LED1 free bits only (non-backlight, via shift register)
 uint8_t hwBacklight      = 0x00;
 
 bool desiredAtcFailLed = true;   // true = ATC FAIL active (LED ON until host clears it via STATE:01 or LED2:00000000)
@@ -79,6 +83,8 @@ bool ledTestActive     = false; // true during boot/DIAG LED tests (disables off
 
 uint8_t desiredBrightness = 0;
 uint8_t hwBrightness = 0;
+
+bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 // ============================================================================
 // DISPLAY STATE
@@ -234,8 +240,10 @@ void controlButtonLED(uint8_t bitIndex, uint8_t registerNum, bool pressed) {
 // ============================================================================
 // BOOT / CONNECTION STATE
 // ============================================================================
-enum BootState { BOOT_INIT, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
+enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
 BootState bootState = BOOT_INIT;
+unsigned long bootFadeStart = 0;
+const unsigned long BOOT_FADE_DURATION_MS = 1500;
 unsigned long bootSequenceStart = 0;
 
 // External state control (from host via STATE:00/01)
@@ -538,7 +546,13 @@ void shiftOutBacklight(uint8_t blBits) {
 }
 
 void applyLEDOutputs() {
-  shiftOutBacklight(desiredBacklight);
+  // Combine free bits (from LED1) + backlight bits (from BL)
+  // In DIAG mode, bypass mask — direct full 8-bit control
+  uint8_t backlightBits = (diagActive || desiredBrightness > 0) ? BACKLIGHT_MASK : 0x00;
+  uint8_t freeBits = diagActive ? desiredBacklight : (desiredBacklight & ~BACKLIGHT_MASK);
+  uint8_t output = freeBits | backlightBits;
+
+  shiftOutBacklight(output);
   // ATC FAIL LED is active-low: LOW (0) = LED ON, HIGH (1) = LED OFF
   // When host is offline and no LED cmd received yet → LED forced ON (simulates ATC FAIL)
   // Once host sends any LED/DSP/BL cmd or STATE:01 → LED controlled by LED2
@@ -549,9 +563,10 @@ void applyLEDOutputs() {
     atcFailOn = desiredAtcFailLed || !hostOnline;
   }
   digitalWrite(ledAtcFail, atcFailOn ? LOW : HIGH);
-  analogWrite(pwmBrightness, desiredBrightness);
+  // Inverted PWM: BL:0 = off, BL:255 = full brightness
+  analogWrite(pwmBrightness, 255 - desiredBrightness);
   
-  hwBacklight = desiredBacklight;
+  hwBacklight = output;
   hwAtcFailLed = desiredAtcFailLed;
   hwBrightness = desiredBrightness;
 }
@@ -714,9 +729,9 @@ void processIncomingLine(const String &line) {
     val.trim();
     
     if (key.equalsIgnoreCase("LED1")) {
-      // LED1: backlight shift register (8 bits)
+      // Only apply free (non-backlight) bits — backlight bits come from BL
       if (!hostOnline) { hostOnline = true; }  // implicit online
-      desiredBacklight = parseBin8(val);
+      desiredBacklight = parseBin8(val) & ~BACKLIGHT_MASK;
       applyLEDOutputs();
     }
     else if (key.equalsIgnoreCase("LED2")) {
@@ -1361,16 +1376,19 @@ void runDiagMenu() {
         case 0:
           // LED Test submenu — run LED walk
           ledTestActive = true;
+          diagActive = true;
           menuMode = 1;
           diagStartTime = now;
           break;
         case 1:
           // Button Test
+          diagActive = true;
           menuMode = 2;
           break;
         case 2:
           // Segment Test
           ledTestActive = true;
+          diagActive = true;
           menuMode = 4;
           diagStartTime = now;
           break;
@@ -1381,6 +1399,7 @@ void runDiagMenu() {
         case 4:
           // Exit
           ledTestActive = false;
+          diagActive = false;
           setLEDState(0x00, false, 0);
           displayTextFull("    ");
           bootState = BOOT_RUNNING;
@@ -1735,9 +1754,11 @@ void setup() {
   Serial.print("ms, REG="); Serial.println(CFG_AIRCRAFT_REG);
   Serial.print("IDENT:"); Serial.println(PANEL_IDENT);
   
-  // Start boot sequence
-  bootState = BOOT_INIT;
-  bootSequenceStart = millis();
+  // Boot fade-in (non-blocking backlight)
+  bootState = BOOT_FADE;
+  bootFadeStart = millis();
+  desiredBrightness = 0;
+  applyLEDOutputs();
 }
 
 // ============================================================================
@@ -1746,10 +1767,20 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   
-  // Handle boot sequence
-  if (bootState == BOOT_INIT) {
-    runBootSequence();
-    return;
+  // ── Boot backlight fade-in (non-blocking) ──
+  if (bootState == BOOT_FADE) {
+    unsigned long elapsed = now - bootFadeStart;
+    if (elapsed >= BOOT_FADE_DURATION_MS) {
+      desiredBrightness = 255;
+      applyLEDOutputs();
+      bootState = BOOT_RUNNING;
+      forceSendNext = true;
+      maybeSendIdentStartup();
+    } else {
+      desiredBrightness = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
+      return;
+    }
   }
   
   // Handle DIAG menu

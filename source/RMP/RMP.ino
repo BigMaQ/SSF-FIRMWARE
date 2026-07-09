@@ -41,8 +41,8 @@ const int pwmBrightness = 3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RMP, v1.6 MAQ";
-const char  FW_VERSION[] = "1.6";
+const char* PANEL_IDENT = "RMP, v1.7 MAQ";
+const char  FW_VERSION[] = "1.7";
 const char  PANEL_SN_PREFIX[] = "RMP-";   // SN-Präfix / SN prefix / คำนำหน้า SN
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -65,7 +65,11 @@ const int DISP_RIGHT = 1;
 // ============================================================================
 // LED STATE (desired + hardware cache)
 // ============================================================================
-uint16_t desiredLedState = 0x0000;  // 16 bits for 2x 8-bit shift registers
+// Backlight mask: which LED1 (high byte) bits are controlled by BL/BLT
+// RMP: all 8 bits of LED1 high byte are backlight controlled
+const uint8_t BACKLIGHT_MASK = 0b11111111;  // LED1 high byte → all backlight
+
+uint16_t desiredLedState = 0x0000;  // 16 bits: LED1=high byte (free bits), LED2=low byte
 uint16_t hwLedState      = 0x0000;
 
 bool desiredIlsLed = false;
@@ -75,6 +79,8 @@ bool hwMlsLed = false;
 
 uint8_t desiredBrightness = 0;
 uint8_t hwBrightness = 0;
+
+bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 // ============================================================================
 // DISPLAY STATE
@@ -321,8 +327,10 @@ void updateButtonLEDFades() {
 // ============================================================================
 // BOOT / CONNECTION STATE
 // ============================================================================
-enum BootState { BOOT_INIT, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
+enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING, BOOT_DIAG_MENU, BOOT_DIAG_TEST };
 BootState bootState = BOOT_INIT;
+unsigned long bootFadeStart = 0;
+const unsigned long BOOT_FADE_DURATION_MS = 1500;
 unsigned long bootSequenceStart = 0;
 
 // Boot version message (non-blocking, auto-clears after 5s)
@@ -621,7 +629,18 @@ void shiftOutLEDs(uint16_t ledBits) {
 }
 
 void applyLEDOutputs() {
-  shiftOutLEDs(desiredLedState);
+  // Combine free bits + backlight bits, inverted PWM
+  // In DIAG mode, bypass mask — direct full 16-bit control
+  uint8_t backlightBits = (diagActive || desiredBrightness > 0) ? BACKLIGHT_MASK : 0x00;
+  uint16_t output;
+  if (diagActive) {
+    output = desiredLedState;
+  } else {
+    uint8_t led1Free = (uint8_t)((desiredLedState >> 8) & ~BACKLIGHT_MASK);
+    uint8_t led1Out = led1Free | backlightBits;
+    output = ((uint16_t)led1Out << 8) | (desiredLedState & 0x00FF);
+  }
+  shiftOutLEDs(output);
   bool ilsOut = desiredIlsLed;
   bool mlsOut = desiredMlsLed;
   if (CFG_PCB_IS_12) {
@@ -631,9 +650,10 @@ void applyLEDOutputs() {
   }
   digitalWrite(ledIlsSel, ilsOut ? HIGH : LOW);
   digitalWrite(ledMlsSel, mlsOut ? HIGH : LOW);
-  analogWrite(pwmBrightness, desiredBrightness);
+  // Inverted PWM: BL:0 = off, BL:255 = full brightness
+  analogWrite(pwmBrightness, 255 - desiredBrightness);
   
-  hwLedState = desiredLedState;
+  hwLedState = output;
   hwIlsLed = desiredIlsLed;
   hwMlsLed = desiredMlsLed;
   hwBrightness = desiredBrightness;
@@ -929,6 +949,7 @@ void processIncomingLine(const char* line) {
         } else if (strieq(tok, "DIAG")) {
           if (bootState == BOOT_RUNNING) {
             bootState = BOOT_DIAG_MENU;
+            diagActive = true;
             diagStartTime = millis();
             diagStage = 0;
             Serial.println("DIAG:START;");
@@ -970,7 +991,8 @@ void processIncomingLine(const char* line) {
       while (vend >= 0 && val[vend] == ' ') val[vend--] = 0;
       
       if (strieq(kp, "LED1")) {
-        desiredLedState = (desiredLedState & 0x00FF) | (parseBin8(val) << 8);
+        // Only apply free (non-backlight) bits to LED1 high byte — backlight bits come from BL
+        desiredLedState = (desiredLedState & 0x00FF) | ((parseBin8(val) & ~BACKLIGHT_MASK) << 8);
         applyLEDOutputs();
       }
       else if (strieq(kp, "LED2")) {
@@ -1410,6 +1432,7 @@ void processSerialTokensFromHost() {
       if (strcmp(tokenUp, "DIAG") == 0) {
         if (bootState == BOOT_RUNNING) {
           bootState = BOOT_DIAG_MENU;
+          diagActive = true;
           diagStartTime = millis();
           diagStage = 0;
           menuInitialized = false;
@@ -1835,6 +1858,7 @@ void runDiagMenu() {
     updateDisplay(DISP_LEFT, "      ");
     updateDisplay(DISP_RIGHT, "      ");
     bootState = BOOT_RUNNING;
+    diagActive = false;
     menuInitialized = false;
     return;
   }
@@ -1898,6 +1922,7 @@ void runDiagMenu() {
         diagStartTime = now;
       } else if (menuIndex == 3) {
         // Exit
+        diagActive = false;
         setLEDState(0x0000, false, false, 0);
         displayText("      ", "      ");
         updateDisplay(DISP_LEFT, "      ");
@@ -2221,6 +2246,7 @@ void runFullDiagSequence() {
       diagReturnToMenu = false;
     } else {
       bootState = BOOT_RUNNING;
+      diagActive = false;
     }
     diagComboWasActive = false;
     // Reset offline message state so it shows fresh after DIAG
@@ -2607,8 +2633,11 @@ void setup() {
     bootMessageStart = millis();
   }
   
-  // Go straight to running – no boot animation
-  bootState = BOOT_RUNNING;
+  // Boot fade-in (non-blocking backlight)
+  bootState = BOOT_FADE;
+  bootFadeStart = millis();
+  desiredBrightness = 0;
+  applyLEDOutputs();
   forceSendNext = true;
   maybeSendIdentStartup();
 }
@@ -2638,6 +2667,20 @@ void loop() {
     displayText("      ", "      ");
   }
   
+  // ── Boot backlight fade-in (non-blocking) ──
+  if (bootState == BOOT_FADE) {
+    unsigned long elapsed = now - bootFadeStart;
+    if (elapsed >= BOOT_FADE_DURATION_MS) {
+      desiredBrightness = 255;
+      applyLEDOutputs();
+      bootState = BOOT_RUNNING;
+    } else {
+      desiredBrightness = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
+      return;
+    }
+  }
+
   processSerialTokensFromHost();
   
   // --- DATA mode: VHF3 LED edge detection & XFER swap ---
