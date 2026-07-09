@@ -894,19 +894,26 @@ void loop() {
     return;
   }
 
-  // Non-blocking backlight fade-in on boot
+  // Non-blocking backlight fade-in/out on boot (welcome animation)
   if (bootState == BOOT_FADE) {
     unsigned long elapsed = now - bootFadeStart;
-    if (elapsed >= BOOT_FADE_DURATION_MS) {
-      desiredBacklight = 255;
+    unsigned long totalMs = BOOT_FADE_DURATION_MS * 2;  // in + out
+    if (elapsed >= totalMs) {
+      // Done — backlight off, enter running
+      desiredBacklight = 0;
       applyLEDOutputs();
       bootState = BOOT_RUNNING;
-    } else {
-      // Linear ramp: 0 → 255 over fade duration
+    } else if (elapsed < BOOT_FADE_DURATION_MS) {
+      // Phase 1: fade IN  0 → 255
       desiredBacklight = (uint8_t)((unsigned long)255 * elapsed / BOOT_FADE_DURATION_MS);
       applyLEDOutputs();
-      return;  // Skip main loop during fade
+    } else {
+      // Phase 2: fade OUT  255 → 0
+      unsigned long outElapsed = elapsed - BOOT_FADE_DURATION_MS;
+      desiredBacklight = 255 - (uint8_t)((unsigned long)255 * outElapsed / BOOT_FADE_DURATION_MS);
+      applyLEDOutputs();
     }
+    return;  // Skip main loop during fade
   }
 
   processSerialTokensFromHost();
