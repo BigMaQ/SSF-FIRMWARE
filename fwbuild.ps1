@@ -51,7 +51,8 @@ $Panels = @(
     @{Key="HYDPRS"; InoName="HYDPRS"; FlatFile="accu_press.ino"; OutDir="accupress"; Fqbn="arduino:avr:micro"},
     @{Key="DOOR";   InoName="DOOR";   FlatFile="CPT_DOOR.ino";    OutDir="door";      Fqbn="arduino:avr:micro"},
     @{Key="OHP_PRI"; InoName="OHP_PRI"; FlatFile="OHP_PRI.INO";   OutDir="ohp_pri";  Fqbn="arduino:avr:mega:cpu=atmega2560"},
-    @{Key="OHP_SEC"; InoName="OHP_SEC"; FlatFile="OHP_SEC.INO";   OutDir="ohp_sec";  Fqbn="arduino:avr:mega:cpu=atmega2560"}
+    @{Key="OHP_SEC"; InoName="OHP_SEC"; FlatFile="OHP_SEC.INO";   OutDir="ohp_sec";  Fqbn="arduino:avr:mega:cpu=atmega2560"},
+    @{Key="WXR";    InoName="WXR";    FlatFile="WXR.ino";        OutDir="wxr";       Fqbn="arduino:avr:micro"}
 )
 
 # ═══════════════════════ 1. SYNC ═══════════════════════
