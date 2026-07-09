@@ -41,8 +41,8 @@ const int PIN_BACKLIGHT = 3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "WXR, v1.0 MAQ";
-const char  FW_VERSION[] = "1.0";
+const char* PANEL_IDENT = "WXR, v1.1 MAQ";
+const char  FW_VERSION[] = "1.1";
 const char  PANEL_SN_PREFIX[] = "WXR-";
 bool identSentOnStart = false;
 
@@ -52,9 +52,14 @@ char CFG_SERIAL_NUMBER[10] = "";  // 8 hex chars + null
 // ============================================================================
 // LED / BACKLIGHT STATE
 // ============================================================================
-uint8_t desiredLedState = 0x00;  // 8-bit for single 74HC595
-uint8_t hwLedState      = 0x00;
-uint8_t desiredBacklight = 0;
+// Backlight mask: which LED1 bits are controlled by BL/BLT instead of LED1 command
+// WXR: bits 0-5 = backlight (6 LEDs), bits 6-7 = free (direct LED1 control)
+// Other panels can override this mask (e.g. RMP might use fewer bits)
+const uint8_t BACKLIGHT_MASK = 0b00111111;  // bits 0-5 → backlight
+
+uint8_t desiredLedState = 0x00;     // Free bits only (non-backlight), set via LED1
+uint8_t hwLedState      = 0x00;     // Last written to shift register
+uint8_t desiredBacklight = 0;       // 0=off, 1-255=PWM brightness (inverted on OE)
 uint8_t hwBacklight = 0;
 
 // ============================================================================
@@ -119,6 +124,7 @@ bool hostOnline = false;
 // DIAG state
 unsigned long diagStartTime = 0;
 int diagStage = 0;
+bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 // ============================================================================
 // RUNTIME BUFFERS
@@ -181,13 +187,21 @@ void shiftOutLEDs(uint8_t ledBits) {
 }
 
 void applyLEDOutputs() {
+  // Combine free bits (from LED1) + backlight bits (from BL/BLT)
+  // In DIAG mode, bypass mask — direct full 8-bit control
+  uint8_t backlightBits = (diagActive || desiredBacklight > 0) ? BACKLIGHT_MASK : 0x00;
+  uint8_t freeBits = diagActive ? desiredLedState : (desiredLedState & ~BACKLIGHT_MASK);
+  uint8_t output = freeBits | backlightBits;
+
   // Always shift out unconditionally (same as RMP/ACP)
-  shiftOutLEDs(desiredLedState);
-  hwLedState = desiredLedState;
+  shiftOutLEDs(output);
+  hwLedState = output;
 
   // Backlight PWM on Pin 3 → TLC5916 OE (active LOW)
-  // BL:0 = OE LOW = outputs enabled, BL:255 = OE HIGH = outputs disabled
-  analogWrite(PIN_BACKLIGHT, desiredBacklight);
+  // Inverted: BL:0  = PWM 255 = OE HIGH = outputs disabled = backlight OFF
+  //           BL:255 = PWM 0   = OE LOW  = outputs enabled  = backlight FULL
+  uint8_t pwm = 255 - desiredBacklight;
+  analogWrite(PIN_BACKLIGHT, pwm);
   hwBacklight = desiredBacklight;
 }
 
@@ -353,14 +367,13 @@ void processIncomingLine(const char* line) {
       while (vend >= 0 && val[vend] == ' ') val[vend--] = 0;
 
       if (strieq(kp, "LED1")) {
-        desiredLedState = parseBin8(val);
+        // Only apply free (non-backlight) bits — backlight bits come from BL/BLT
+        desiredLedState = parseBin8(val) & ~BACKLIGHT_MASK;
         applyLEDOutputs();
       }
       else if (strieq(kp, "BL") || strieq(kp, "BLT")) {
-        // Backlight PWM on Pin 3 → connected to TLC5916 OE (active LOW)
-        // BL:0  = OE LOW  → outputs enabled, LEDs on
-        // BL:255 = OE HIGH → outputs disabled, LEDs off
-        // BL:128 = 50% PWM → dimmed LEDs (no flicker at 490Hz)
+        // Backlight brightness: 0=off, 1-255=on with PWM dimming
+        // Backlight bits in shift register are set/cleared automatically
         desiredBacklight = constrain(atoi_s(val), 0, 255);
         applyLEDOutputs();
       }
@@ -595,6 +608,12 @@ void processSerialTokensFromHost() {
 void runDiagSequence() {
   unsigned long elapsed = millis() - diagStartTime;
 
+  // DIAG bypasses backlight mask for full 8-bit LED control
+  if (!diagActive) {
+    diagActive = true;
+    desiredBacklight = 0;  // Disable backlight PWM during DIAG
+  }
+
   // Total: ~7 seconds
   // Stage 0 (0-1s): LED1 all on, backlight full
   if (elapsed < 1000) {
@@ -631,6 +650,7 @@ void runDiagSequence() {
     desiredLedState = 0x00;
     desiredBacklight = 0;
     applyLEDOutputs();
+    diagActive = false;
     bootState = BOOT_RUNNING;
     Serial.println("DIAG:COMPLETE;");
   }
