@@ -162,9 +162,14 @@ function Write-StatusTable {
         $iv = "v{0}" -f $r.InoVersion
         Write-Host ("{0,-8}  {1,-8}  {2,-8}  {3,-6}  {4}" -f $r.Key, $iv, $hv, $icon, $action)
     }
+    $script:RebuildActive  # (caller sets this before invoking)
     Write-Host ""
-    $color = if ($needBuild -gt 0) { "Yellow" } else { "Green" }
-    Write-Host "BUILD NEEDED: $needBuild panel(s)" -ForegroundColor $color
+    if ($script:RebuildActive) {
+        Write-Host "REBUILD: all $($Results.Count) panel(s) — overwriting HEX" -ForegroundColor Yellow
+    } else {
+        $color = if ($needBuild -gt 0) { "Yellow" } else { "Green" }
+        Write-Host "BUILD NEEDED: $needBuild panel(s)" -ForegroundColor $color
+    }
     return $needBuild
 }
 
@@ -289,6 +294,7 @@ if ($CheckVersion) {
 if (-not $Build -and -not $Rebuild) { exit 0 }
 
 Write-Host "=== FIRMWARE $(if ($Rebuild) {'REBUILD'} else {'BUILD'}) ===" -ForegroundColor Cyan
+$script:RebuildActive = $Rebuild
 $need = Write-StatusTable $allStatus
 Write-Host ""
 

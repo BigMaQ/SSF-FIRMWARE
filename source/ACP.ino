@@ -19,8 +19,8 @@ const int backlightPWM = 3;
 const int annunPWM     = 6;
 
 // --- Panel identification ---
-const char* PANEL_IDENT = "ACP 1 CPT, v2.2 MAQ";
-const char  FW_VERSION[] = "2.2";
+const char* PANEL_IDENT = "ACP 1 CPT, v2.3 MAQ";
+const char  FW_VERSION[] = "2.3";
 const char  PANEL_SN_PREFIX[] = "ACP-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -44,9 +44,10 @@ const char* HWREV_PASSWORD = "ACP-HW-SET";
 uint8_t hwRevision = 1;
 
 // --- LED state (desired + hardware) ---
-// Backlight mask: which LED1 bits are controlled by BL instead of LED1 command
-// ACP: bits 0-5 = backlight (6 LEDs), bits 6-7 = free (direct LED1 control)
-const uint8_t BACKLIGHT_MASK1 = 0b00111111;  // bits 0-5 → backlight
+// Rev 1: LED1 bits 0-6 = backlight (7 LEDs), bit 7 = PA_SEL annunciator
+// Rev 2+: LED1 bits 0-5 = backlight (6 LEDs), bits 6-7 = free
+const uint8_t BACKLIGHT_MASK1_REV1 = 0b01111111;  // Rev1: bits 0-6 → backlight, bit 7 = PA_SEL
+const uint8_t BACKLIGHT_MASK1_REV2 = 0b00111111;  // Rev2+: bits 0-5 → backlight
 
 uint8_t desiredLedBacklight = 0x00;  // LED1 free bits only (non-backlight)
 uint8_t desiredLedAnnun     = 0x00;
@@ -151,10 +152,13 @@ void shiftOutLEDs(uint8_t backlightBits, uint8_t annunBits, uint8_t led3Bits) {
 }
 
 void applyLEDOutputs() {
+  // HW-Rev-abhängige Backlight-Maske wählen
+  uint8_t blMask = (hwRevision == 1) ? BACKLIGHT_MASK1_REV1 : BACKLIGHT_MASK1_REV2;
+
   // Combine free bits (from LED1) + backlight bits (from BL)
   // In DIAG mode, bypass mask — direct full 8-bit control
-  uint8_t backlightBits = (diagActive || desiredBlLevel > 0) ? BACKLIGHT_MASK1 : 0x00;
-  uint8_t freeBits = diagActive ? desiredLedBacklight : (desiredLedBacklight & ~BACKLIGHT_MASK1);
+  uint8_t backlightBits = (diagActive || desiredBlLevel > 0) ? blMask : 0x00;
+  uint8_t freeBits = diagActive ? desiredLedBacklight : (desiredLedBacklight & ~blMask);
   uint8_t backlightOut = freeBits | backlightBits;
 
   uint8_t led3Effective = (hwRevision >= 2) ? desiredLed3 : 0x00;
@@ -334,7 +338,11 @@ void processIncomingLine(const String &line) {
     if (token.length() == 0) continue;
 
     if (token.indexOf(':') < 0) {
-      if (token.equalsIgnoreCase("VER") || token.equalsIgnoreCase("VERSION")) { sendIdentAndState(); continue; }
+      if (token.equalsIgnoreCase("VER") || token.equalsIgnoreCase("VERSION")) {
+        sendIdentAndState();
+        if (bootState == BOOT_RUNNING) { bootState = BOOT_FADE; bootFadeStart = millis(); }
+        continue;
+      }
       if (token.equalsIgnoreCase("HWREV")) { Serial.print("HWREV:"); Serial.print(hwRevision); Serial.println(";"); continue; }
       if (token.equalsIgnoreCase("REQ")) { forceSendNext = true; continue; }
       continue;
@@ -346,7 +354,10 @@ void processIncomingLine(const String &line) {
     String val = token.substring(colon + 1);
     key.trim(); val.trim();
 
-    if (key.equalsIgnoreCase("LED1")) setLEDState(parseBin8(val) & ~BACKLIGHT_MASK1, desiredLedAnnun, desiredLed3, desiredBlLevel, desiredAnLevel);
+    if (key.equalsIgnoreCase("LED1")) {
+      uint8_t blMask = (hwRevision == 1) ? BACKLIGHT_MASK1_REV1 : BACKLIGHT_MASK1_REV2;
+      setLEDState(parseBin8(val) & ~blMask, desiredLedAnnun, desiredLed3, desiredBlLevel, desiredAnLevel);
+    }
     else if (key.equalsIgnoreCase("LED2")) setLEDState(desiredLedBacklight, parseBin8(val), desiredLed3, desiredBlLevel, desiredAnLevel);
     else if (key.equalsIgnoreCase("LED3")) setLEDState(desiredLedBacklight, desiredLedAnnun, parseBin8(val), desiredBlLevel, desiredAnLevel);
     else if (key.equalsIgnoreCase("BL")) { BL_LEVEL = constrain(val.toInt(),0,255); setLEDState(desiredLedBacklight, desiredLedAnnun, desiredLed3, BL_LEVEL, desiredAnLevel); }
@@ -463,6 +474,11 @@ void processSerialTokensFromHost() {
       if (tokenUp == "VER" || tokenUp == "VERSION") {
         sendIdentAndState();
         identSentOnStart = true;
+        // Boot-Fade bei Host-Connect starten
+        if (bootState == BOOT_RUNNING) {
+          bootState = BOOT_FADE;
+          bootFadeStart = millis();
+        }
         pauseUntil = millis() + 200;
         continue;
       }
@@ -506,12 +522,11 @@ void setup() {
   pinMode(inputDataPin, INPUT); pinMode(inputClockPin, OUTPUT); pinMode(inputLatchPin, OUTPUT);
   pinMode(ledLatchPin, OUTPUT); pinMode(ledClockPin, OUTPUT); pinMode(ledDataPin, OUTPUT);
   pinMode(backlightPWM, OUTPUT); pinMode(annunPWM, OUTPUT);
-  analogWrite(backlightPWM,0); analogWrite(annunPWM,0);
+  analogWrite(backlightPWM,255); analogWrite(annunPWM,0);  // Invertierte PWM: 255=AUS (kein Backlight beim Boot)
   for(int i=0;i<16;i++){muxVals[i]=0; lastMuxVals[i]=-9999; muxBufferIdx[i]=0;}
   lastInputState1=0xFF; lastInputState2=0xFF;
-  // Boot fade-in (non-blocking backlight)
-  bootState = BOOT_FADE;
-  bootFadeStart = millis();
+  // Boot-Fade erst nach Host-Connect (IDENT), nicht bei Power-On
+  bootState = BOOT_RUNNING;
   desiredBlLevel = 0;
   applyLEDOutputs();
   sendIdentAndState();
