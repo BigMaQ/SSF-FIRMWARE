@@ -40,22 +40,26 @@ Das **SSF ACP** ist ein originalgetreues Audio Control Panel im Airbus-A320-Desi
 
 ### Serial Output (ACP → Sim)
 
-Das Panel sendet bei jeder Änderung (Taster oder Poti) sowie auf `REQ;`:
+Das Panel sendet **änderungsbasiert** (Change-only) — nur was sich wirklich geändert hat:
 
-```
-MUX0:0512;MUX1:1023;...MUX15:0000;IN1:01000001;IN2:00001000;
-```
+| Ereignis | Frame |
+|---|---|
+| Poti-Drehung (Delta ≥ `SMO_THR`) | `MUX3:0512;` — nur der/die geänderten Kanäle |
+| Taster | `IN1:01000001;IN2:00001000;` — immer beide Register zusammen |
+| Start / `REQ;` | `MUX0:0512;MUX1:1023;...MUX15:0000;IN1:01000001;IN2:00001000;` — voller Status |
+
+Beim Start (Host-Verbindung) und auf `REQ;` sendet das Panel den **kompletten** Status, damit der Simulator mit dem Panel synchron ist. Danach fließen nur noch Änderungs-Frames — kein Full-Status-Chatter mehr bei Poti-Drehungen.
 
 | Feld | Beschreibung |
 |---|---|
-| **MUX0–MUX15:** | 16 Analogwerte (4-stellig, 0–1023) vom 4067-Multiplexer. |
+| **MUX0–MUX15:** | 16 Analogwerte (4-stellig, 0–1023) vom 4067-Multiplexer. Einzelne Kanäle können unabhängig voneinander gesendet werden. |
 | **IN1:** | 8-Bit Binärstatus der Eingänge (HC165 Register 1). |
 | **IN2:** | 8-Bit Binärstatus (HC165 Register 2). |
 
 Beim Start oder auf `VER;`/`IDENT;`:
 
 ```
-IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
+IDENT:ACP 1 CPT, v2.4 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 ```
 
 ---
@@ -69,8 +73,11 @@ IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 
 ### Startup-Boot-Sequenz
 
-Beim Einschalten durchläuft das Panel eine kurze LED-Sequenz:
-0xAA → 0x55 → 0xFF → 0x00 (je 150 ms).
+Beim Einschalten läuft eine kurze, **nicht-blockierende** LED-Show (ca. 1–2 s, je nach HW-Rev):
+Lauflicht (Chaser) über die frei steuerbaren LEDs (LED2, bei Rev 2 auch LED3) hin und zurück,
+während die Backlight-Gruppe im Takt auf- und abblendet, dann kurzer All-On/All-Off-Blink.
+Danach sind alle LEDs aus. Die Show blockiert die serielle Kommunikation **nicht** —
+der Sim/Connect kann währenddessen bereits verbinden (IDENT/Status laufen normal).
 
 ---
 
@@ -81,7 +88,7 @@ Beim Einschalten durchläuft das Panel eine kurze LED-Sequenz:
 - **Eingänge:** 2× 74HC165 Schieberegister (16 Taster)
 - **Analog-MUX:** 1× 4067 16:1 Multiplexer (S0–S3 = A0–A3, Output = A6)
 - **PWM:** Backlight (Pin 3), Annunciator (Pin 6)
-- **Panel-ID:** `ACP 1 CPT, v2.1 MAQ` | Firmware: `2.1`
+- **Panel-ID:** `ACP 1 CPT, v2.4 MAQ` | Firmware: `2.4`
 
 ---
 
@@ -104,11 +111,33 @@ Beim Einschalten durchläuft das Panel eine kurze LED-Sequenz:
 | Befehl | Wirkung |
 |---|---|
 | `SET ENA:0815;` | Einstellungsmodus aktivieren (PIN = 0815) |
-| `SET FW:1.5;` | PCB-Version setzen (Format: Hauptversion.Nebenversion) |
+| `SET FW:1.5;` | **PCB-Version** setzen (Format: Hauptversion.Nebenversion) – nur Anzeigetext, ändert NICHT die HW-Revision! |
 | `SET ACID:D-AIDA;` | A/C-Registrierung setzen (Format: X-XXXX, max 8 Zeichen) |
 | `SET SN:XXXXXXXX;` | Seriennummer setzen (8-stellig Hex) |
 | `SET WRITE;` / `SET WRI:YES;` | Konfiguration in EEPROM speichern + Neustart |
 | `SET EXIT;` | Einstellungsmodus deaktivieren |
+
+> **Wichtig:** `SET FW` ändert nur den PCB-Versionstext (z.B. "PCb 1.2") im EEPROM.
+> Die tatsächliche **HW-Revision** (steuert Anzahl der LED-Schieberegister: 1→2×74HC595, 2→3×74HC595)
+> wird mit `HWREVSET:2,ACP-HW-SET;` gesetzt – dieser Befehl benötigt KEIN `SET ENA` vorher!
+
+### Typischer Ablauf zum Ändern der HW-Revision:
+
+```
+HWREVSET:2,ACP-HW-SET;   → HW-Revision auf 2 setzen (separater Befehl, kein SET ENA nötig)
+SET:ENA:0815              → Einstellungsmodus aktivieren
+SET FW:1.2                → PCB-Version auf "PCb 1.2" setzen (optional, nur Text)
+SET:WRI:YES               → Alles ins EEPROM schreiben + Reboot
+```
+
+### Typischer Ablauf zum Ändern von AC-ID / Seriennummer:
+
+```
+SET:ENA:0815              → Einstellungsmodus aktivieren
+SET ACID:D-AIDA           → Neue Registrierung setzen
+SET SN:A1B2C3D4           → Neue Seriennummer setzen
+SET:WRI:YES               → Speichern + Reboot
+```
 
 
 ---
@@ -157,22 +186,26 @@ The **SSF ACP** is a faithful Audio Control Panel in Airbus A320 design for Micr
 
 ### Serial Output (ACP → Sim)
 
-The panel sends on every change (button or potentiometer) as well as on `REQ;`:
+The panel sends **change-based** (change-only) — only what actually changed:
 
-```
-MUX0:0512;MUX1:1023;...MUX15:0000;IN1:01000001;IN2:00001000;
-```
+| Event | Frame |
+|---|---|
+| Potentiometer rotation (delta ≥ `SMO_THR`) | `MUX3:0512;` — only the changed channel(s) |
+| Button | `IN1:01000001;IN2:00001000;` — both registers always together |
+| Startup / `REQ;` | `MUX0:0512;MUX1:1023;...MUX15:0000;IN1:01000001;IN2:00001000;` — full status |
+
+On startup (host connect) and on `REQ;` the panel sends the **complete** status so the simulator stays in sync with the panel. After that, only change frames are sent — no more full-status chatter while turning potentiometers.
 
 | Field | Description |
 |---|---|
-| **MUX0–MUX15:** | 16 analog values (4-digit, 0–1023) from the 4067 multiplexer. |
+| **MUX0–MUX15:** | 16 analog values (4-digit, 0–1023) from the 4067 multiplexer. Individual channels may be sent independently. |
 | **IN1:** | 8-bit binary status of inputs (HC165 register 1). |
 | **IN2:** | 8-bit binary status (HC165 register 2). |
 
 On startup or on `VER;`/`IDENT;`:
 
 ```
-IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
+IDENT:ACP 1 CPT, v2.4 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 ```
 
 ---
@@ -186,8 +219,11 @@ IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 
 ### Startup Boot Sequence
 
-On power-up, the panel runs a short LED sequence:
-0xAA → 0x55 → 0xFF → 0x00 (150 ms each).
+On power-up a short **non-blocking** LED show runs (approx. 1–2 s, depending on HW Rev):
+a chaser light running through the freely controllable LEDs (LED2, plus LED3 on Rev 2) back and forth,
+while the backlight group fades up and down in sync, then a short all-on/all-off blink.
+Afterwards all LEDs are off. The show does **not** block serial communication —
+the SIM/connect can already link up during it (IDENT/status run normally).
 
 ---
 
@@ -198,7 +234,7 @@ On power-up, the panel runs a short LED sequence:
 - **Inputs:** 2× 74HC165 shift registers (16 buttons)
 - **Analog MUX:** 1× 4067 16:1 multiplexer (S0–S3 = A0–A3, Output = A6)
 - **PWM:** Backlight (Pin 3), Annunciator (Pin 6)
-- **Panel ID:** `ACP 1 CPT, v2.1 MAQ` | Firmware: `2.1`
+- **Panel ID:** `ACP 1 CPT, v2.4 MAQ` | Firmware: `2.4`
 
 ---
 
@@ -221,11 +257,33 @@ On power-up, the panel runs a short LED sequence:
 | Command | Effect |
 |---|---|
 | `SET ENA:0815;` | Activate settings mode (PIN = 0815) |
-| `SET FW:1.5;` | Set PCB version (format: major.minor) |
+| `SET FW:1.5;` | **PCB version** set (format: major.minor) – display text only, does NOT change HW revision! |
 | `SET ACID:D-AIDA;` | Set A/C registration (format: X-XXXX, max 8 characters) |
 | `SET SN:XXXXXXXX;` | Set serial number (8 hex digits) |
 | `SET WRITE;` / `SET WRI:YES;` | Save configuration to EEPROM + restart |
 | `SET EXIT;` | Deactivate settings mode |
+
+> **Important:** `SET FW` only changes the PCB version text (e.g. "PCb 1.2") in EEPROM.
+> The actual **HW revision** (controls number of LED shift registers: 1→2×74HC595, 2→3×74HC595)
+> is set with `HWREVSET:2,ACP-HW-SET;` – this command does NOT require `SET ENA` beforehand!
+
+### Typical workflow to change HW revision:
+
+```
+HWREVSET:2,ACP-HW-SET;   → Set HW revision to 2 (separate command, no SET ENA needed)
+SET:ENA:0815              → Activate settings mode
+SET FW:1.2                → Set PCB version to "PCb 1.2" (optional, text only)
+SET:WRI:YES               → Write everything to EEPROM + reboot
+```
+
+### Typical workflow to change AC-ID / serial number:
+
+```
+SET:ENA:0815              → Activate settings mode
+SET ACID:D-AIDA           → Set new registration
+SET SN:A1B2C3D4           → Set new serial number
+SET:WRI:YES               → Save + reboot
+```
 
 
 ---
@@ -274,22 +332,26 @@ On power-up, the panel runs a short LED sequence:
 
 ### เอาต์พุต Serial (ACP → Sim)
 
-แผงจะส่งทุกครั้งที่มีการเปลี่ยนแปลง (ปุ่มกดหรือโพเทนชิโอมิเตอร์) และเมื่อได้รับ `REQ;`:
+แผงจะส่งแบบ **ตามการเปลี่ยนแปลง (Change-only)** — เฉพาะค่าที่เปลี่ยนแปลงจริง:
 
-```
-MUX0:0512;MUX1:1023;...MUX15:0000;IN1:01000001;IN2:00001000;
-```
+| เหตุการณ์ | เฟรม |
+|---|---|
+| หมุนโพเทนชิโอมิเตอร์ (delta ≥ `SMO_THR`) | `MUX3:0512;` — เฉพาะช่องที่เปลี่ยน |
+| ปุ่มกด | `IN1:01000001;IN2:00001000;` — ส่งทั้งสองรีจิสเตอร์ด้วยกันเสมอ |
+| เริ่มต้น / `REQ;` | `MUX0:0512;MUX1:1023;...MUX15:0000;IN1:01000001;IN2:00001000;` — สถานะเต็ม |
+
+เมื่อเริ่มต้น (เชื่อมต่อโฮสต์) และเมื่อได้รับ `REQ;` แผงจะส่ง**สถานะเต็ม**เพื่อให้ซิมูเลเตอร์ซิงค์กับแผง หลังจากนั้นจะส่งเฉพาะเฟรมการเปลี่ยนแปลง — ไม่มีแชตเตอร์สถานะเต็มเมื่อหมุนโพเทนชิโอมิเตอร์อีกต่อไป
 
 | ฟิลด์ | คำอธิบาย |
 |---|---|
-| **MUX0–MUX15:** | ค่าอนาล็อก 16 ค่า (4 หลัก, 0–1023) จากมัลติเพล็กเซอร์ 4067 |
+| **MUX0–MUX15:** | ค่าอนาล็อก 16 ค่า (4 หลัก, 0–1023) จากมัลติเพล็กเซอร์ 4067 แต่ละช่องสามารถส่งแยกกันได้ |
 | **IN1:** | สถานะไบนารี 8 บิตของอินพุต (HC165 รีจิสเตอร์ 1) |
 | **IN2:** | สถานะไบนารี 8 บิต (HC165 รีจิสเตอร์ 2) |
 
 เมื่อเริ่มต้นหรือเมื่อได้รับ `VER;`/`IDENT;`:
 
 ```
-IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
+IDENT:ACP 1 CPT, v2.4 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 ```
 
 ---
@@ -303,8 +365,11 @@ IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 
 ### ลำดับการเริ่มต้น
 
-เมื่อเปิดเครื่อง แผงจะแสดงลำดับ LED สั้นๆ:
-0xAA → 0x55 → 0xFF → 0x00 (ครั้งละ 150 มิลลิวินาที)
+เมื่อเปิดเครื่อง จะมีการแสดง LED สั้นๆ แบบ **ไม่บล็อก** (ประมาณ 1–2 วินาที ขึ้นอยู่กับรุ่น HW):
+แสงวิ่ง (Chaser) ผ่าน LED ที่ควบคุมได้อิสระ (LED2 และ LED3 ในรุ่น 2) ไปและกลับ
+พร้อมกับกลุ่มไฟพื้นหลังที่ค่อยๆ สว่างและหรี่ลงตามจังหวะ แล้วกระพริบทั้งหมดสว่าง/ดับสั้นๆ
+จากนั้น LED ทั้งหมดดับ การแสดงนี้**ไม่บล็อก**การสื่อสารแบบอนุกรม —
+ซิม/การเชื่อมต่อสามารถเชื่อมต่อได้ทันทีระหว่างการแสดง (IDENT/สถานะทำงานปกติ)
 
 ---
 
@@ -315,7 +380,7 @@ IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 - **อินพุต:** 74HC165 ชิฟต์รีจิสเตอร์ 2 ชุด (16 ปุ่ม)
 - **MUX อนาล็อก:** 4067 มัลติเพล็กเซอร์ 16:1 จำนวน 1 ชุด (S0–S3 = A0–A3, เอาต์พุต = A6)
 - **PWM:** แสงพื้นหลัง (ขา 3), ตัวประกาศ (ขา 6)
-- **รหัสแผง:** `ACP 1 CPT, v2.1 MAQ` | เฟิร์มแวร์: `2.1`
+- **รหัสแผง:** `ACP 1 CPT, v2.4 MAQ` | เฟิร์มแวร์: `2.4`
 
 ---
 
@@ -338,8 +403,30 @@ IDENT:ACP 1 CPT, v2.1 MAQ, SN:ACP-XXXXXXXX;STATE:RUNNING;HWREV:1;
 | คำสั่ง | ผลลัพธ์ |
 |---|---|
 | `SET ENA:0815;` | เปิดใช้งานโหมดตั้งค่า (PIN = 0815) |
-| `SET FW:1.5;` | ตั้งค่าเวอร์ชัน PCB (รูปแบบ: หลัก.รอง) |
+| `SET FW:1.5;` | ตั้งค่า**เวอร์ชัน PCB** (รูปแบบ: หลัก.รอง) – แค่ข้อความแสดงผล ไม่เปลี่ยนรุ่น HW! |
 | `SET ACID:D-AIDA;` | ตั้งค่าทะเบียน A/C (รูปแบบ: X-XXXX, สูงสุด 8 ตัวอักษร) |
 | `SET SN:XXXXXXXX;` | ตั้งค่าหมายเลขซีเรียล (8 หลักฐานสิบหก) |
 | `SET WRITE;` / `SET WRI:YES;` | บันทึกการกำหนดค่าลง EEPROM + เริ่มใหม่ |
 | `SET EXIT;` | ปิดใช้งานโหมดตั้งค่า |
+
+> **สำคัญ:** `SET FW` เปลี่ยนแค่ข้อความเวอร์ชัน PCB (เช่น "PCb 1.2") ใน EEPROM
+> **รุ่น HW** จริง (ควบคุมจำนวนชิฟต์รีจิสเตอร์ LED: 1→2×74HC595, 2→3×74HC595)
+> ตั้งค่าด้วย `HWREVSET:2,ACP-HW-SET;` – คำสั่งนี้ไม่ต้องใช้ `SET ENA` ล่วงหน้า!
+
+### ขั้นตอนเปลี่ยนรุ่น HW:
+
+```
+HWREVSET:2,ACP-HW-SET;   → ตั้งรุ่น HW เป็น 2 (คำสั่งแยกต่างหาก ไม่ต้อง SET ENA)
+SET:ENA:0815              → เปิดโหมดตั้งค่า
+SET FW:1.2                → ตั้งเวอร์ชัน PCB เป็น "PCb 1.2" (ไม่จำเป็น, แค่ข้อความ)
+SET:WRI:YES               → เขียนทุกอย่างลง EEPROM + รีบูต
+```
+
+### ขั้นตอนเปลี่ยน AC-ID / หมายเลขซีเรียล:
+
+```
+SET:ENA:0815              → เปิดโหมดตั้งค่า
+SET ACID:D-AIDA           → ตั้งทะเบียนใหม่
+SET SN:A1B2C3D4           → ตั้งหมายเลขซีเรียลใหม่
+SET:WRI:YES               → บันทึก + รีบูต
+```

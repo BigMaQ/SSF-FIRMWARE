@@ -19,8 +19,8 @@ const int backlightPWM = 3;
 const int annunPWM     = 6;
 
 // --- Panel identification ---
-const char* PANEL_IDENT = "ACP 1 CPT, v2.3 MAQ";
-const char  FW_VERSION[] = "2.3";
+const char* PANEL_IDENT = "ACP 1 CPT, v2.4 MAQ";
+const char  FW_VERSION[] = "2.4";
 const char  PANEL_SN_PREFIX[] = "ACP-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -64,10 +64,12 @@ uint8_t hwAnLevel      = 0;
 bool diagActive = false;  // Set true during DIAG to bypass backlight mask
 
 // --- Boot state ---
-enum BootState { BOOT_INIT, BOOT_FADE, BOOT_RUNNING };
+enum BootState { BOOT_INIT, BOOT_SHOW, BOOT_FADE, BOOT_RUNNING };
 BootState bootState = BOOT_INIT;
 unsigned long bootFadeStart = 0;
 const unsigned long BOOT_FADE_DURATION_MS = 1500;
+unsigned long bootShowStart = 0;
+const unsigned long BOOT_SHOW_STEP_MS = 50;
 
 // --- Runtime buffers / flags ---
 String serialAccum = "";
@@ -487,7 +489,8 @@ void processSerialTokensFromHost() {
         continue;
       }
       if (tokenUp == "REQ") {
-        sendStatus();
+        // Full status on next loop — fresh MUX/IN values are read before the send.
+        forceSendNext = true;
         continue;
       }
       if (token.indexOf(':') >= 0) {
@@ -502,15 +505,99 @@ void processSerialTokensFromHost() {
 }
 
 // --- Status ---
-void sendStatus() {
+// Full status frame: all 16 MUX + IN1 + IN2.
+// Used on startup (forceSendNext) and REQ — keeps the SIM fully in sync with the panel.
+// After sending, the change-detection state is synced so no duplicate change frames follow.
+void sendFullStatus() {
   unsigned long now = millis();
   if (!forceSendNext && (now - lastSendTs) < SEND_MIN_INTERVAL_MS) return;
-  for (int i=0;i<16;i++){Serial.print("MUX");Serial.print(i);Serial.print(":");Serial.print(decPad4(muxVals[i]));Serial.print(";");}
+  for (int i=0;i<16;i++){
+    Serial.print("MUX");Serial.print(i);Serial.print(":");Serial.print(decPad4(muxVals[i]));Serial.print(";");
+    lastMuxVals[i] = muxVals[i];
+  }
   Serial.print("IN1:"); Serial.print(bin8(inputState1)); Serial.print(";IN2:"); Serial.println(bin8(inputState2));
+  lastInputState1 = inputState1; lastInputState2 = inputState2;
   lastSendTs = now; forceSendNext = false;
 }
 
+// Change-only frame: sends only the MUX channel(s) that moved >= SMO_THRESHOLD.
+// Potentiometer rotation now pushes only the changed channel — no full-frame chatter.
+// lastMuxVals is updated only when the frame is actually sent (throttle-safe: no lost changes).
+void sendMuxChanges() {
+  unsigned long now = millis();
+  if ((now - lastSendTs) < SEND_MIN_INTERVAL_MS) return;
+  bool any = false;
+  for (int i=0;i<16;i++){
+    if(abs(muxVals[i]-lastMuxVals[i])>=SMO_THRESHOLD){
+      Serial.print("MUX");Serial.print(i);Serial.print(":");Serial.print(decPad4(muxVals[i]));Serial.print(";");
+      lastMuxVals[i] = muxVals[i];
+      any = true;
+    }
+  }
+  if(any){ Serial.println(); lastSendTs = now; }
+}
 
+// Change-only frame for buttons: IN1+IN2 are ALWAYS sent together
+// (the Python parser only emits inputs_update when both registers arrive in the same frame).
+// Returns true when actually sent — caller updates its "last" state only then,
+// so a throttled button press is re-sent on the next loop instead of being lost.
+bool sendInputChanges() {
+  unsigned long now = millis();
+  if ((now - lastSendTs) < SEND_MIN_INTERVAL_MS) return false;
+  Serial.print("IN1:"); Serial.print(bin8(inputState1)); Serial.print(";IN2:"); Serial.println(bin8(inputState2));
+  lastSendTs = now;
+  return true;
+}
+
+
+
+// --- Boot lightshow (non-blocking) ---
+// Runs as a state machine inside loop(): a single LED chases through the free
+// registers (LED2 + LED3) while the backlight group breathes with BL.
+// Serial stays fully live during the show — the SIM can connect right away.
+void bootShowUpdate() {
+  unsigned long elapsed = millis() - bootShowStart;
+  const int chaserBits = (hwRevision >= 2) ? 16 : 8;      // LED2 (+LED3 on Rev2)
+  const unsigned long phaseLen = (unsigned long)chaserBits * BOOT_SHOW_STEP_MS;
+  const unsigned long blinkOn  = 2 * phaseLen;            // all on (short)
+  const unsigned long blinkOff = blinkOn + 120;            // all off (short)
+  const unsigned long totalMs  = blinkOff + 120;
+
+  uint8_t led2 = 0;
+  uint8_t led3 = 0;
+  uint8_t bl   = 0;
+
+  if (elapsed < phaseLen) {
+    // Chaser forward: bit wanders 0..n-1
+    int pos = elapsed / BOOT_SHOW_STEP_MS;
+    if (pos < 8) led2 = (uint8_t)(1 << (7 - pos));         // MSB-first like bin8()
+    else         led3 = (uint8_t)(1 << (15 - pos));
+    bl = (uint8_t)(40 + (elapsed % BOOT_SHOW_STEP_MS) * 200 / BOOT_SHOW_STEP_MS);  // breathe up 40..240
+  } else if (elapsed < 2 * phaseLen) {
+    // Chaser backward
+    unsigned long t = elapsed - phaseLen;
+    int pos = chaserBits - 1 - (int)(t / BOOT_SHOW_STEP_MS);
+    if (pos < 8) led2 = (uint8_t)(1 << (7 - pos));
+    else         led3 = (uint8_t)(1 << (15 - pos));
+    bl = (uint8_t)(240 - (t % BOOT_SHOW_STEP_MS) * 200 / BOOT_SHOW_STEP_MS);        // breathe down 240..40
+  } else if (elapsed < blinkOn + 120) {
+    // All on (short blink)
+    led2 = 0xFF; led3 = 0xFF; bl = 200;
+  } else if (elapsed < totalMs) {
+    // All off
+    led2 = 0x00; led3 = 0x00; bl = 0;
+  } else {
+    // Show finished → normal operation
+    bootState = BOOT_RUNNING;
+  }
+
+  desiredLedBacklight = 0x00;   // LED1 free bits (PA_SEL) stay off during show
+  desiredLedAnnun = led2;
+  desiredLed3 = led3;
+  desiredBlLevel = bl;
+  desiredAnLevel = 0;
+  applyLEDOutputs();
+}
 
 // --- Setup ---
 void setup() {
@@ -525,8 +612,9 @@ void setup() {
   analogWrite(backlightPWM,255); analogWrite(annunPWM,0);  // Invertierte PWM: 255=AUS (kein Backlight beim Boot)
   for(int i=0;i<16;i++){muxVals[i]=0; lastMuxVals[i]=-9999; muxBufferIdx[i]=0;}
   lastInputState1=0xFF; lastInputState2=0xFF;
-  // Boot-Fade erst nach Host-Connect (IDENT), nicht bei Power-On
-  bootState = BOOT_RUNNING;
+  // Boot-Lightshow beim Power-On (non-blocking, läuft im loop())
+  bootState = BOOT_SHOW;
+  bootShowStart = millis();
   desiredBlLevel = 0;
   applyLEDOutputs();
   sendIdentAndState();
@@ -538,6 +626,11 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   if (now < pauseUntil) return;
+
+  // ── Boot lightshow (non-blocking; serial & status stay LIVE) ──
+  if (bootState == BOOT_SHOW) {
+    bootShowUpdate();
+  }
 
   // ── Boot backlight welcome pulse (fade-IN + fade-OUT, non-blocking) ──
   if (bootState == BOOT_FADE) {
@@ -572,20 +665,27 @@ void loop() {
   // --- Read ShiftRegisters (HC165) ---
   readShiftRegisters(inputState1,inputState2);
 
-  // --- Button Changes ---
+  // --- Full status on request (REQ / startup sync) ---
+  // Sends ALL 16 MUX + IN1 + IN2 so the SIM is fully in sync with the panel.
+  if(forceSendNext){
+    sendFullStatus();
+  }
+
+  // --- Button Changes (change-only frame: IN1+IN2 together) ---
   if(inputState1 != lastInputState1 || inputState2 != lastInputState2){
     if(now - lastDebounceTs >= DEBOUNCE_MS){
       lastDebounceTs = now;
-      lastInputState1 = inputState1;
-      lastInputState2 = inputState2;
-      sendStatus();
+      // Only accept the change as "sent" when the frame actually went out —
+      // otherwise a throttled press is retried on the next loop, not lost.
+      if(sendInputChanges()){
+        lastInputState1 = inputState1;
+        lastInputState2 = inputState2;
+      }
     }
   }
 
-  // --- MUX changes (using SMO_THRESHOLD parameter) ---
-  bool muxChanged = false;
-  for(int i=0;i<16;i++){if(abs(muxVals[i]-lastMuxVals[i])>=SMO_THRESHOLD){muxChanged=true;lastMuxVals[i]=muxVals[i];}}
-  if(muxChanged) sendStatus();
+  // --- MUX changes (change-only frame, using SMO_THRESHOLD parameter) ---
+  sendMuxChanges();
 
   // --- DIAG Combo ---
   bool comboNow = (inputState1==0b01000001)&&(inputState2==0b00001000);
