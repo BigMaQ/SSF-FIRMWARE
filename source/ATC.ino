@@ -50,8 +50,8 @@ const int pinStby      = A0;  // STBY   → IN3 bit 6
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "ATC, v1.4 MAQ";
-const char  FW_VERSION[] = "1.4";
+const char* PANEL_IDENT = "ATC, v1.5 MAQ";
+const char  FW_VERSION[] = "1.5";
 const char  PANEL_SN_PREFIX[] = "ATC-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -549,9 +549,9 @@ void shiftOutBacklight(uint8_t blBits) {
 
 void applyLEDOutputs() {
   // Combine free bits (from LED1) + backlight bits (from BL)
-  // Alle 8 Bits sind Backlight: das Muster kommt direkt aus LED1,
-  // die Helligkeit ausschliesslich aus BL/BLT (PWM).
-  uint8_t output = desiredBacklight;
+  // BL/BLT schaltet das Backlight ein/aus (PWM = Helligkeit, falls Pin 3
+  // verdrahtet); LED1 setzt das Muster innerhalb dieses Zustands.
+  uint8_t output = (diagActive || desiredBrightness > 0) ? desiredBacklight : 0x00;
 
   shiftOutBacklight(output);
   // ATC FAIL LED is active-low: LOW (0) = LED ON, HIGH (1) = LED OFF
@@ -745,6 +745,9 @@ void processIncomingLine(const String &line) {
     else if (key.equalsIgnoreCase("BL")) {
       if (!hostOnline) { hostOnline = true; }  // implicit online
       desiredBrightness = constrain(val.toInt(), 0, 255);
+      if (desiredBrightness > 0 && desiredBacklight == 0x00) {
+        desiredBacklight = BACKLIGHT_MASK;  // BL > 0 schaltet das Backlight ein
+      }
       applyLEDOutputs();
     }
     else if (key.equalsIgnoreCase("DISP_BL")) {
