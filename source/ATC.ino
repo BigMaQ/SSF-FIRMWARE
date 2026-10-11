@@ -50,8 +50,8 @@ const int pinStby      = A0;  // STBY   → IN3 bit 6
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "ATC, v1.3 MAQ";
-const char  FW_VERSION[] = "1.3";
+const char* PANEL_IDENT = "ATC, v1.4 MAQ";
+const char  FW_VERSION[] = "1.4";
 const char  PANEL_SN_PREFIX[] = "ATC-";
 bool identSentOnStart = false;
 unsigned long pauseUntil = 0;
@@ -70,11 +70,13 @@ const int DISP_DEVICE = 0;
 // ============================================================================
 // LED STATE (desired + hardware cache)
 // ============================================================================
-// Backlight mask: which LED1 bits are controlled by BL/BLT instead of LED1 command
-// ATC: bits 0-5 = backlight (6 LEDs), bits 6-7 = free (direct LED1 control)
-const uint8_t BACKLIGHT_MASK = 0b00111111;  // bits 0-5 → backlight
+// Backlight: ALLE 8 Ausgaenge des 74HC595 sind Backlight-LEDs (siehe
+// manual/ATC_Manual.md); die einzige Annunciator-LED (ATC FAIL) haengt direkt
+// am Arduino (Pin 7). LED1 ist damit das vollstaendige 8-Bit-Backlight-Muster,
+// BL/BLT steuert ausschliesslich die Helligkeit (PWM).
+const uint8_t BACKLIGHT_MASK = 0b11111111;  // alle 8 Bits = Backlight
 
-uint8_t desiredBacklight = 0x00;   // LED1 free bits only (non-backlight, via shift register)
+uint8_t desiredBacklight = 0x00;   // LED1-Muster: alle 8 Bits = Backlight
 uint8_t hwBacklight      = 0x00;
 
 bool desiredAtcFailLed = true;   // true = ATC FAIL active (LED ON until host clears it via STATE:01 or LED2:00000000)
@@ -84,7 +86,7 @@ bool ledTestActive     = false; // true during boot/DIAG LED tests (disables off
 uint8_t desiredBrightness = 0;
 uint8_t hwBrightness = 0;
 
-bool diagActive = false;  // Set true during DIAG to bypass backlight mask
+bool diagActive = false;  // DIAG-Testmodus (Muster werden direkt ausgegeben)
 
 // ============================================================================
 // DISPLAY STATE
@@ -547,10 +549,9 @@ void shiftOutBacklight(uint8_t blBits) {
 
 void applyLEDOutputs() {
   // Combine free bits (from LED1) + backlight bits (from BL)
-  // In DIAG mode, bypass mask — direct full 8-bit control
-  uint8_t backlightBits = (diagActive || desiredBrightness > 0) ? BACKLIGHT_MASK : 0x00;
-  uint8_t freeBits = diagActive ? desiredBacklight : (desiredBacklight & ~BACKLIGHT_MASK);
-  uint8_t output = freeBits | backlightBits;
+  // Alle 8 Bits sind Backlight: das Muster kommt direkt aus LED1,
+  // die Helligkeit ausschliesslich aus BL/BLT (PWM).
+  uint8_t output = desiredBacklight;
 
   shiftOutBacklight(output);
   // ATC FAIL LED is active-low: LOW (0) = LED ON, HIGH (1) = LED OFF
@@ -729,9 +730,9 @@ void processIncomingLine(const String &line) {
     val.trim();
     
     if (key.equalsIgnoreCase("LED1")) {
-      // Only apply free (non-backlight) bits — backlight bits come from BL
       if (!hostOnline) { hostOnline = true; }  // implicit online
-      desiredBacklight = parseBin8(val) & ~BACKLIGHT_MASK;
+      // Alle 8 Bits sind Backlight-LEDs (siehe Manual)
+      desiredBacklight = parseBin8(val);
       applyLEDOutputs();
     }
     else if (key.equalsIgnoreCase("LED2")) {
@@ -1756,6 +1757,7 @@ void setup() {
   
   // Boot fade-in (non-blocking backlight)
   bootState = BOOT_FADE;
+  desiredBacklight = 0xFF;  // Puls braucht ein Muster (alle 8 Backlight-Bits)
   bootFadeStart = millis();
   desiredBrightness = 0;
   applyLEDOutputs();
