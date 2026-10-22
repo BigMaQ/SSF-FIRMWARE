@@ -1,0 +1,54 @@
+{
+  "source": {
+    "repo": "https://github.com/ccrawford/CC_ISIS",
+    "license": "MIT — Copyright (c) Chris Crawford (Hinweis wird mitgefuehrt)",
+    "notes": "Werte werden ueber die Upstream-Message-IDs eingespeist, also genau den Weg, den die echte Firmware geht (CC_ISIS::set)."
+  },
+  "canvas": { "width": 480, "height": 480 },
+  "scenes": [
+    {
+      "id": "01_reiseflug",
+      "name": "Reiseflug (Cruise)",
+      "frames": 400,
+      "description": "Referenzzustand: Horizont waagerecht, leichte Nase-hoch-Lage. Fahrtband links mit Marke bei 280, Hoehenband rechts mit 35000, QNH-Kasten (blau) zeigt 1013, Mach-Kasten (gruen) zeigt .78. Rollzeiger in der Mitte.",
+      "msgs": { "60": "280", "102": "0.78", "77": "35000", "100": "1013", "101": "0", "80": "-2.5", "72": "0", "71": "0" }
+    },
+    {
+      "id": "02_kurve",
+      "name": "Steile Kurve (Bank 32 Grad)",
+      "frames": 400,
+      "description": "Horizont um 32 Grad geneigt, Rollzeiger auf der Rollskala ausgelenkt, Pitch-Leiter mitgedreht (10/20-Grad-Linien), Slip/Skid-Kugel leicht aus der Mitte. Prueft die Rotationsmathematik der Attitude-Anzeige.",
+      "msgs": { "60": "300", "102": "0.80", "77": "24000", "100": "1013", "101": "0", "80": "4", "72": "32", "71": "0.7" }
+    },
+    {
+      "id": "03_std",
+      "name": "STD-Modus an",
+      "frames": 400,
+      "description": "Baro-Modus 101 = 1: Im Druckkasten unten rechts muss statt der Zahl der Text STD stehen (Schriftgroesse 1.2). Sonst identisch zum Reiseflug, damit nur dieser Unterschied auffaellt.",
+      "msgs": { "60": "250", "102": "0.70", "77": "11000", "100": "1013", "101": "1", "80": "0", "72": "0", "71": "0" }
+    },
+    {
+      "id": "04_helligkeitsmenu",
+      "name": "Helligkeitsmenue offen (Ersatz fuer BUGS-Menue)",
+      "frames": 400,
+      "brightness_menu": 65,
+      "description": "Das Upstream-ISIS hat KEIN BUGS-Menue (kein createMenuItems() in CC_ISIS.cpp). Einzig vorhanden ist BrightnessMenu aus ISISCommon.h — hier als Overlay ueber den Reiseflug gelegt (65 %). Zeigt die Menue-Grafik (Rahmen, Titel Backlight, Prozentwert, Balken) korrekt an oder nicht.",
+      "msgs": { "60": "280", "102": "0.78", "77": "35000", "100": "1013", "101": "0", "80": "-2.5", "72": "0", "71": "0" }
+    },
+    {
+      "id": "05_ls_cdi",
+      "name": "LS/CDI aktiv (NAV-Quelle, Needles valid)",
+      "frames": 400,
+      "description": "Erwartung: KEINE LS-Skalen und KEINE Deviations-Diamanten. drawLS() ist in CC_ISIS.h nur deklariert, in CC_ISIS.cpp nicht implementiert und wird nirgends aufgerufen; die CDI-/GS-Felder (Message 2/3/5/6/10) werden von keiner Zeichenroutine gelesen. Hier zusaetzlich Mach 0.30 (< 0.45), wodurch drawMach() den Mach-Kasten leert.",
+      "msgs": { "60": "200", "102": "0.30", "77": "5000", "100": "1002", "101": "0", "80": "0", "72": "0", "71": "0", "10": "0", "2": "0.5", "3": "1", "5": "0.4", "6": "1" }
+    },
+    {
+      "id": "06_ls_probe",
+      "name": "LS-Probe: wie 01, nur CDI/GS/NAV gesetzt",
+      "frames": 400,
+      "compare_with": "01_reiseflug",
+      "description": "Pixelbeweis zur LS-Frage: exakt die Werte von 01_reiseflug (gleiche Mach 0.78, gleiche Hoehe/Fahrt), zusaetzlich NAV-Quelle 10=0, CDI-Offset 2=0.5, CDI-valid 3=1, GS-Deviation 5=0.4, GS-valid 6=1. Bleibt der FNV-Hash gleich dem von 01_reiseflug, veraendern diese Felder das Bild nicht — es gibt also keine LS-Skalen/Diamanten im Upstream.",
+      "msgs": { "60": "280", "102": "0.78", "77": "35000", "100": "1013", "101": "0", "80": "-2.5", "72": "0", "71": "0", "10": "0", "2": "0.5", "3": "1", "5": "0.4", "6": "1" }
+    }
+  ]
+}

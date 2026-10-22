@@ -1,0 +1,174 @@
+//
+// main.cpp — A320 ISIS panel, own firmware (no MobiFlight).
+//
+// Replaces the MobiFlight firmware core: setup(), loop(), WiFi, display
+// initialisation, PSRAM sprite allocation and the watchdog.
+//
+// Data path:  UDP 5005 -> proto.cpp (parser) -> isisState -> CC_ISIS::update()
+//             (unchanged upstream graphics) -> canvas -> displaycfgComposite()
+//
+// Display/graphics code: MIT License, Copyright (c) 2024 Chris Crawford / elral
+// (https://github.com/ccrawford/CC_ISIS) - see LICENSE_CC_ISIS.txt.
+//
+// Build:     pio run -e esp32s3
+// Flash:     pio run -e esp32s3 -t upload          (USB, first time only)
+// Tests:     pio test -e native
+//
+#include <Arduino.h>
+#include <esp_task_wdt.h>
+
+#include "CC_ISIS.h"
+#include "ISISCommon.h"
+#include "displaycanvas.h"
+#include "displaycfg.h"
+#include "net.h"
+#include "buttons.h"
+
+#ifndef ISIS_FW_VERSION
+#define ISIS_FW_VERSION "0.0.0"
+#endif
+
+#ifndef ISIS_CANVAS_SIZE
+#define ISIS_CANVAS_SIZE 480
+#endif
+
+#define ISIS_FRAME_INTERVAL_MS 50   // 20 Hz render/service tick
+#define ISIS_WDT_TIMEOUT_S     30
+
+CC_ISIS isis;
+
+namespace {
+
+uint32_t g_lastTickMs = 0;
+
+// Snapshot of the smoothed values to detect real changes (spec risk table:
+// "draw() nur bei Aenderung").
+struct SmoothSnapshot {
+    float pitch = 0.0f;
+    float bank  = 0.0f;
+    float speed = 0.0f;
+    float alt   = 0.0f;
+};
+
+SmoothSnapshot snapshot()
+{
+    SmoothSnapshot s;
+    s.pitch = isisState.pitchAngle;
+    s.bank  = isisState.bankAngle;
+    s.speed = isisState.airspeed;
+    s.alt   = isisState.altitude;
+    return s;
+}
+
+bool changed(const SmoothSnapshot &a, const SmoothSnapshot &b)
+{
+    return fabsf(a.pitch - b.pitch) > 0.0001f ||
+           fabsf(a.bank - b.bank) > 0.0001f ||
+           fabsf(a.speed - b.speed) > 0.0001f ||
+           fabsf(a.alt - b.alt) > 0.0001f;
+}
+
+} // namespace
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(200);
+    Serial.println();
+    Serial.println("=== A320 ISIS (own firmware, no MobiFlight) ===");
+    Serial.printf("FW %s   PSRAM %u bytes free / %u total\n", ISIS_FW_VERSION,
+                  (unsigned)ESP.getFreePsram(), (unsigned)ESP.getPsramSize());
+
+    // ---- watchdog (spec section 10, criterion 8) ----
+    esp_task_wdt_init(ISIS_WDT_TIMEOUT_S, true);
+    esp_task_wdt_add(NULL);
+
+    // ---- buttons first: BRT+ / BRT- held at boot forces the setup mode ----
+    bool needSetup = false;
+    const char *setupReason = "";
+
+    if (buttonsBegin()) {
+        const uint8_t raw = buttonsReadRaw();
+        if (buttonsBootCombo(raw)) {
+            needSetup   = true;
+            setupReason = "boot combo BRT+ / BRT-";
+        }
+    } else {
+        Serial.println("[isis] no PCF8574 found - buttons disabled");
+    }
+
+    // ---- display: panel + composition canvas ----
+    displaycfgBegin();
+
+    // ---- stored settings (NVS namespace "isis", spec section 2) ----
+    // Must run before isis.begin(): CC_ISIS reads isisSettings.lcdBrightness
+    // and the unit settings from it.  A virgin NVS is filled with defaults.
+    if (!loadSettings()) {
+        Serial.println("[isis] settings: defaults (fresh NVS)");
+    } else {
+        Serial.printf("[isis] settings: v%d, brightness %u, unit %u\n",
+                      isisSettings.version, (unsigned)isisSettings.lcdBrightness,
+                      (unsigned)isisSettings.baroUnit);
+    }
+
+    lcd.setColorDepth(8);
+    if (!lcd.createSprite(ISIS_CANVAS_SIZE, ISIS_CANVAS_SIZE)) {
+        Serial.println("[isis] FATAL: 480x480 canvas could not be allocated (PSRAM!)");
+    }
+    lcd.fillSprite(TFT_BLACK);
+
+    // ---- the unchanged upstream display device ----
+    isis.begin();
+
+    // ---- network ----
+    if (!needSetup) {
+        if (!netBegin()) {
+            needSetup   = true;
+            setupReason = "no WiFi connection within 10 s / no credentials in NVS";
+        }
+    }
+
+    if (needSetup) {
+        // SoftAP + captive portal, returns only to reboot (spec section 4.1).
+        netEnterSetup(setupReason);
+    }
+
+    // First full paint.
+    isisState.forceRedraw = true;
+    isis.update();
+    displaycfgComposite(displaycfgCurrent());
+
+    g_lastTickMs = millis();
+    Serial.println("[isis] ready");
+}
+
+void loop()
+{
+    const uint32_t now = millis();
+    esp_task_wdt_reset();
+
+    // ---- network: receive frames, beacon, OTA ----
+    netLoop(now);
+
+    // ---- buttons ----
+    buttonsService(now);
+
+    // ---- 20 Hz render tick ----
+    if ((uint32_t)(now - g_lastTickMs) >= ISIS_FRAME_INTERVAL_MS) {
+        g_lastTickMs = now;
+
+        const SmoothSnapshot before = snapshot();
+        const bool forced           = isisState.forceRedraw;
+        isisState.forceRedraw       = false;
+
+        // Unchanged upstream graphics pipeline.
+        isis.update();
+
+        const SmoothSnapshot after = snapshot();
+
+        // Only touch the panel when the picture really changed.
+        if (forced || changed(before, after)) {
+            displaycfgComposite(displaycfgCurrent());
+        }
+    }
+}

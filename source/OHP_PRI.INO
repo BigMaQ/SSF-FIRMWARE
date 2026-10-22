@@ -693,7 +693,7 @@ static void processToken(char* tok) {
     }
     if (strieq(kp, "ANN"))     { annuBrightness  = (uint8_t)constrain(atoi_s(val), 0, 255); applyLEDOutputs(); return; }
     if (strieq(kp, "BL"))      { backlBrightness = (uint8_t)constrain(atoi_s(val), 0, 255); applyLEDOutputs(); return; }
-    if (strieq(kp, "DISP_BL")) { setDisplayBrightness((uint8_t)atoi_s(val)); return; }
+    if (strieq(kp, "DISP_BL") || strieq(kp, "DSP_BL")) { setDisplayBrightness((uint8_t)atoi_s(val)); return; }
     if (strieq(kp, "REQ"))     { forceSendNext = true; return; }
     if (strieq(kp, "VER"))     { sendIdentAndState(); return; }
 

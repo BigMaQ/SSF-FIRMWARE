@@ -906,7 +906,7 @@ void processIncomingLine(const char* line) {
       else if (strieq(key, "LED7")) { uint8_t v = parseBin8(val); desiredBlLed = (desiredBlLed & 0x00FFFF00) | (uint32_t)v; applyOutputs(); if (ackEnabled) { char b8[9]; bin8(b8, v); Serial.print("ACK:LED7:"); Serial.println(b8); } }
       else if (strieq(key, "BL")) { desiredBlLevel = constrain(atoi_s(val), 0, 255); applyOutputs(); }
       else if (strieq(key, "AN")) { desiredAnLevel = constrain(atoi_s(val), 0, 255); applyOutputs(); }
-      else if (strieq(key, "DISP_BL")) { DISP_BL_LEVEL = constrain(atoi_s(val), 0, 15); for (int dev = 0; dev < 2; dev++) lc.setIntensity(dev, DISP_BL_LEVEL); }
+      else if (strieq(key, "DISP_BL") || strieq(key, "DSP_BL")) { DISP_BL_LEVEL = constrain(atoi_s(val), 0, 15); for (int dev = 0; dev < 2; dev++) lc.setIntensity(dev, DISP_BL_LEVEL); }
       else if (strieq(key, "DSP1")) { if (val[0] == '-') { chronoRowCHR = ""; } else { chronoRowCHR = padWithZeros(trimToDigits(String(val), 4), 4); } renderChronoDisplays(); if (ackEnabled) { Serial.print("ACK:DSP1:"); Serial.println(chronoRowCHR); } }
       else if (strieq(key, "DSP2")) { if (val[0] == '-') { chronoRowUTC = ""; } else { chronoRowUTC = padWithZeros(trimToDigits(String(val), 6), 6); } renderChronoDisplays(); if (ackEnabled) { Serial.print("ACK:DSP2:"); Serial.println(chronoRowUTC); } }
       else if (strieq(key, "DSP3")) { if (val[0] == '-') { chronoRowET = ""; } else { chronoRowET = padWithZeros(trimToDigits(String(val), 4), 4); } renderChronoDisplays(); if (ackEnabled) { Serial.print("ACK:DSP3:"); Serial.println(chronoRowET); } }

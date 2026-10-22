@@ -1,4 +1,4 @@
-<# 
+﻿<# 
 .SYNOPSIS
     SSF Firmware Build & Version Manager
 .DESCRIPTION
@@ -16,12 +16,14 @@
     Nach erfolgreichem Build Git commit + push (mit Bestaetigung).
 .PARAMETER AddPanel
     Neue .INO-Dateien im Source-Ordner erkennen und zum Build-System hinzufuegen.
+    Erkennt auch PlatformIO-Projekte (Ordner mit platformio.ini, z.B. ISIS).
 .PARAMETER Rebuild
-    Alle Panels (oder eines mit -Panel) neu builden und bestehende HEX
+    Alle Panels (oder eines mit -Panel) neu builden und bestehende HEX/BIN
     mit gleicher Versionsnummer ueberschreiben (fuer Tests/Kleinigkeiten).
 .EXAMPLE
     .\fwbuild.ps1 -Build -Git         # Build + Git commit/push
     .\fwbuild.ps1 -Build -Panel ACP   # Nur ACP builden
+    .\fwbuild.ps1 -Build -Panel ISIS  # Nur ISIS builden (PlatformIO, ESP32-S3)
     .\fwbuild.ps1 -Rebuild             # Alles rebuilden (ueberschreibt)
     .\fwbuild.ps1 -Rebuild -Panel RMP # Nur RMP rebuilden
     .\fwbuild.ps1 -CheckVersion        # Version-Check
@@ -61,10 +63,23 @@ $Panels = @(
     @{Key="WXR";    InoName="WXR";    FlatFile="WXR.ino";        OutDir="wxr";       Fqbn="arduino:avr:micro"}
 )
 
+# ═══════════════════════ PlatformIO panels (IP/ESP32) ═══════════════════════
+# A panel whose source folder contains a platformio.ini is built with
+# "pio run -e <env>" instead of the Arduino CLI, and its output is a .bin
+# (instead of a .hex).  Additive - the AVR panels above are untouched.
+# Version is read from source\<Folder>\version.txt.
+# --- PIO-INSERT-POINT : Add-NewPanel inserts further PlatformIO panels above this line ---
+$Panels += @{Key="ISIS"; InoName="isis"; FlatFile=""; OutDir="isis"; Fqbn="platformio"; Pio="esp32s3"; VerMacro="ISIS_FW_VERSION"}
+
 # ═══════════════════════ 1. SYNC ═══════════════════════
 function Sync-SketchFolders {
     Write-Host "=== Syncing sketch folders ===" -ForegroundColor Cyan
     foreach ($p in $Panels) {
+        # PlatformIO panels have no .ino to sync - platformio.ini is the project file
+        if ($p.Pio) {
+            Write-Host "  . $($p.Key) (PlatformIO) - no sync" -ForegroundColor DarkGray
+            continue
+        }
         $srcFile   = Join-Path $SourceDir $p.FlatFile
         $sketchDir = Join-Path $SourceDir $p.InoName
         $destFile  = Join-Path $sketchDir "$($p.InoName).ino"
@@ -117,6 +132,54 @@ function Get-LatestHexVersion {
     return [string]$sorted[0]
 }
 
+# ═══════════════════════ PlatformIO support ═══════════════════════
+# Version of a PlatformIO panel comes from source\<Folder>\version.txt
+function Get-TxtVersion {
+    param([string]$FilePath)
+    if (-not (Test-Path $FilePath)) { return "?" }
+    $content = (Get-Content $FilePath -Raw -Encoding UTF8).Trim()
+    if ($content -match '(\d+(?:\.\d+)+)') { return $matches[1] }
+    return "?"
+}
+
+# Newest .bin in the output folder (counterpart of Get-LatestHexVersion)
+# Version aus dem build_flag einer platformio.ini lesen, z. B.
+#   -DISIS_FW_VERSION=\"0.1.0\"
+# Der Wert landet per VER-Kommando beim FCC - deshalb muss er zu version.txt
+# passen, sonst zeigt die Oberflaeche eine andere Version als das Panel meldet.
+function Get-PioVersionFromIni {
+    param([string]$IniFile, [string]$Macro)
+    if (-not (Test-Path $IniFile)) { return "" }
+    $pattern = [regex]::Escape($Macro) + '\s*=\s*\\?"([0-9][0-9.]*)'
+    $hit = Select-String -Path $IniFile -Pattern $pattern | Select-Object -First 1
+    if ($hit) { return $hit.Matches[0].Groups[1].Value }
+    return ""
+}
+
+function Get-LatestBinVersion {
+    param([string]$Folder)
+    if (-not (Test-Path $Folder)) { return "" }
+    $versions = @()
+    Get-ChildItem $Folder -Filter "*.bin" | ForEach-Object {
+        if ($_.Name -match 'v?(\d+(?:\.\d+)+)\.bin') { $versions += $matches[1] }
+    }
+    if ($versions.Count -eq 0) { return "" }
+    if ($versions.Count -eq 1) { return [string]$versions[0] }
+    $sorted = $versions | Sort-Object { [version]$_ } -Descending
+    return [string]$sorted[0]
+}
+
+# Locate the PlatformIO executable (venv, PATH or the default penv)
+function Get-PioCommand {
+    foreach ($cand in @("pio", "pio.exe", "platformio",
+                        (Join-Path $env:USERPROFILE ".platformio\penv\Scripts\pio.exe"))) {
+        if ($cand -and (Test-Path $cand)) { return $cand }
+        $cmd = Get-Command $cand -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
+    return $null
+}
+
 function Compare-Versions {
     param([string]$a, [string]$b)
     if ($a -eq "?" -or $b -eq "?" -or $a -eq "" -or $b -eq "") { return 0 }
@@ -130,6 +193,21 @@ function Compare-Versions {
 function Get-AllStatus {
     $results = @()
     foreach ($p in $Panels) {
+        # --- PlatformIO panels (ESP32/IP): version from version.txt, .bin output
+        if ($p.Pio) {
+            $pioDir  = Join-Path $SourceDir $p.InoName
+            $verFile = Join-Path $pioDir "version.txt"
+            $binDir  = Join-Path $FirmwareDir $p.OutDir
+            $verMacro = if ($p.VerMacro) { $p.VerMacro } else { "$($p.Key)_FW_VERSION" }
+            $iniVer = Get-PioVersionFromIni -IniFile (Join-Path $pioDir "platformio.ini") -Macro $verMacro
+            $results += [PSCustomObject]@{
+                Key = $p.Key; InoVersion = Get-TxtVersion $verFile
+                HexVersion = [string](Get-LatestBinVersion $binDir)
+                HexDir = $binDir; InoFile = $verFile; Fqbn = "platformio"
+                Pio = $p.Pio; IniVersion = $iniVer
+            }
+            continue
+        }
         $sketchDir = Join-Path $SourceDir $p.InoName
         $inoFile   = Join-Path $sketchDir "$($p.InoName).ino"
         if (-not (Test-Path $inoFile)) { $inoFile = Join-Path $SourceDir $p.FlatFile }
@@ -152,7 +230,8 @@ function Write-StatusTable {
     $needBuild = 0
     foreach ($r in $Results) {
         $icon = "+"; $action = ""
-        if ($r.InoVersion -eq "?") { $icon = "X"; $action = "MISSING" }
+        if ($r.IniVersion -and $r.IniVersion -ne $r.InoVersion) { $icon = "!"; $action = "VERSION MISMATCH"; $needBuild++ }
+        elseif ($r.InoVersion -eq "?") { $icon = "X"; $action = "MISSING" }
         elseif ($r.HexVersion -ne "" -and (Compare-Versions $r.HexVersion $r.InoVersion) -gt 0) {
             $icon = "^"; $action = "HEX > INO"
         }
@@ -176,6 +255,61 @@ function Write-StatusTable {
 # ═══════════════════════ ADD NEW PANEL ═══════════════════════
 function Add-NewPanel {
     Write-Host "=== New Panel Detection ===" -ForegroundColor Cyan
+
+    # ---- PlatformIO projects (folder with platformio.ini, e.g. ESP32 panels) ----
+    # Runs first and does not touch the .INO flow below.  The new entry is
+    # inserted above the explicit PIO-INSERT-POINT marker, so the fragile
+    # ")`r`n" search used for the .INO panels is not involved.
+    $knownPioDirs = $Panels | ForEach-Object { $_.InoName }
+    $newPioProjects = @()
+    Get-ChildItem $SourceDir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        if ((Test-Path (Join-Path $_.FullName "platformio.ini")) -and ($_.Name -notin $knownPioDirs)) {
+            $newPioProjects += $_
+        }
+    }
+
+    if ($newPioProjects.Count -gt 0) {
+        Write-Host "  Found PlatformIO projects:" -ForegroundColor Yellow
+        foreach ($proj in $newPioProjects) {
+            Write-Host "    $($proj.Name)" -ForegroundColor White
+            $addPio = Read-Host "  Add '$($proj.Name)' to build system? (J/N)"
+            if ($addPio -notmatch '^[JjYy]') { continue }
+
+            $pioKey = Read-Host "    Panel key (e.g. ISIS) [$($proj.Name.ToUpper())]"
+            if (-not $pioKey) { $pioKey = $proj.Name.ToUpper() }
+            $pioKey = $pioKey.ToUpper()
+
+            $pioOut = Read-Host "    Output folder name [$($proj.Name.ToLower())]"
+            if (-not $pioOut) { $pioOut = $proj.Name.ToLower() }
+
+            $pioEnv = Read-Host "    PlatformIO env [esp32s3]"
+            if (-not $pioEnv) { $pioEnv = "esp32s3" }
+
+            $pioEntry = "`$Panels += @{Key=`"$pioKey`"; InoName=`"$($proj.Name)`"; FlatFile=`"`"; OutDir=`"$pioOut`"; Fqbn=`"platformio`"; Pio=`"$pioEnv`"}"
+            Write-Host "    + Adding: $pioEntry" -ForegroundColor Green
+
+            $pioScriptPath = Join-Path $ScriptDir "fwbuild.ps1"
+            $pioContent = Get-Content $pioScriptPath -Raw
+            $marker = "# --- PIO-INSERT-POINT"
+            $markerPos = $pioContent.IndexOf($marker)
+            if ($markerPos -gt 0) {
+                $pioContent = $pioContent.Insert($markerPos, "$pioEntry`r`n")
+                Set-Content $pioScriptPath $pioContent -NoNewline
+                Write-Host "    + Inserted into fwbuild.ps1" -ForegroundColor Green
+            } else {
+                Write-Host "    ! Marker not found - add this line manually to `$Panels:" -ForegroundColor Yellow
+                Write-Host "      $pioEntry" -ForegroundColor White
+            }
+
+            $pioOutDir = Join-Path $FirmwareDir $pioOut
+            New-Item -ItemType Directory -Path $pioOutDir -Force | Out-Null
+            Write-Host "    + Output folder: $pioOutDir" -ForegroundColor Green
+
+            $script:Panels += @{Key=$pioKey; InoName=$proj.Name; FlatFile=""; OutDir=$pioOut; Fqbn="platformio"; Pio=$pioEnv}
+        }
+        Write-Host ""
+    }
+
     $knownKeys = $Panels | ForEach-Object { $_.Key }
     $knownFiles = $Panels | ForEach-Object { $_.FlatFile }
     
@@ -299,8 +433,8 @@ $need = Write-StatusTable $allStatus
 Write-Host ""
 
 if (-not (Test-Path $ArduinoCli)) {
-    Write-Host "ERROR: Arduino CLI not found at $ArduinoCli" -ForegroundColor Red
-    exit 1
+    Write-Host "WARN: Arduino CLI not found at $ArduinoCli" -ForegroundColor Yellow
+    Write-Host "      AVR panels will be skipped, PlatformIO panels still build." -ForegroundColor Yellow
 }
 
 $built = 0; $failed = 0; $skipped = 0
@@ -311,6 +445,45 @@ foreach ($p in $allStatus) {
     if (-not $Rebuild -and $p.InoVersion -eq $p.HexVersion) { Write-Host "  + $($p.Key): v$($p.InoVersion) current" -ForegroundColor DarkGray; $skipped++; continue }
     
     Write-Host "  >> $($p.Key): $(if ($Rebuild) {'REBUILD'} else {''}) v$($p.InoVersion)..." -ForegroundColor Yellow
+
+    # ---- PlatformIO panels (ESP32 / IP panels such as the ISIS) -----------
+    if ($p.Pio) {
+        $pioExe = Get-PioCommand
+        if (-not $pioExe) {
+            Write-Host "    X PlatformIO not found - install it (pip install platformio)" -ForegroundColor Red
+            $failed++; continue
+        }
+        $pioDir = Split-Path -Parent $p.InoFile
+        $verMacro = if ($p.VerMacro) { $p.VerMacro } else { "$($p.Key)_FW_VERSION" }
+        $iniVer = Get-PioVersionFromIni -IniFile (Join-Path $pioDir "platformio.ini") -Macro $verMacro
+        if ($iniVer -and ($iniVer -ne $p.InoVersion)) {
+            Write-Host "    X Versionskonflikt: version.txt = v$($p.InoVersion), platformio.ini = v$iniVer" -ForegroundColor Red
+            Write-Host "      Beide muessen gleich sein - das Panel meldet dem FCC den platformio-Wert (VER)." -ForegroundColor DarkGray
+            $failed++; continue
+        }
+        New-Item -ItemType Directory -Path $p.HexDir -Force | Out-Null
+        $savedPio = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $pioExe run -d $pioDir -e $p.Pio 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        $pioExit = $LASTEXITCODE
+        $ErrorActionPreference = $savedPio
+        $binSrc = Join-Path $pioDir ".pio\build\$($p.Pio)\firmware.bin"
+        if ($pioExit -ne 0 -or -not (Test-Path $binSrc)) {
+            Write-Host "    X PlatformIO build failed (exit $pioExit)" -ForegroundColor Red
+            $failed++; continue
+        }
+        $destBin = Join-Path $p.HexDir "$($p.OutDir)_v$($p.InoVersion).bin"
+        Copy-Item $binSrc $destBin -Force
+        Write-Host "    + $destBin" -ForegroundColor Green
+        $built++
+        continue
+    }
+
+    # ---- AVR panels (Arduino CLI) ----------------------------------------
+    if (-not (Test-Path $ArduinoCli)) {
+        Write-Host "    X Arduino CLI not found" -ForegroundColor Red
+        $failed++; continue
+    }
     $buildDir = Join-Path $FirmwareDir "_build\$($p.Key)"
     $hexDir   = $p.HexDir
     $sketchFolder = Split-Path -Parent $p.InoFile

@@ -1,0 +1,13 @@
+# partitions.csv — A320 ISIS (ESP32-S3, 16 MB flash)
+#
+# TWO app slots -> OTA capable from the very first flash.
+# ISIS_FIRMWARE_SPEC.md section 13: the upstream reference uses huge_app.csv
+# (single 3 MB app slot, no OTA). Switching later would require a full USB
+# re-flash with the panel already built into the MIP, so we start with this.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xe000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x500000,
+app1,       app,  ota_1,   0x510000, 0x500000,
+spiffs,     data, spiffs,  0xA10000, 0x5F0000,

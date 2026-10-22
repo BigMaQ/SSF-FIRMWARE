@@ -7,3 +7,13 @@ source/**/*
 !source/*.ino
 !source/*/
 !source/*/*.ino
+
+# Ausnahme: ISIS ist ein PlatformIO-Projekt (kein .ino) - kompletter Quellbaum
+# wird getrackt, nur die Build-Artefakte nicht.
+!source/isis/
+!source/isis/**
+source/isis/.pio/
+source/isis/.pio-venv/
+source/isis/.platformio/
+source/isis/*.pyc
+source/isis/__pycache__/

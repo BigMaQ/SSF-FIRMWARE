@@ -569,7 +569,7 @@ static void processToken(char* tok) {
         hostOnline = (strcmp(val, "01") == 0 || strcmp(val, "1") == 0); return;
     }
     // DISP_BL: akzeptiert aber kein Display vorhanden (No-op)
-    if (strieq(kp, "DISP_BL")) { return; }
+    if (strieq(kp, "DISP_BL") || strieq(kp, "DSP_BL")) { return; }
     if (strieq(kp, "REQ"))     { forceSendNext = true; return; }
     if (strieq(kp, "VER"))     { sendIdentAndState(); return; }
 

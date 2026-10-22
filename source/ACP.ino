@@ -364,7 +364,7 @@ void processIncomingLine(const String &line) {
     else if (key.equalsIgnoreCase("LED3")) setLEDState(desiredLedBacklight, desiredLedAnnun, parseBin8(val), desiredBlLevel, desiredAnLevel);
     else if (key.equalsIgnoreCase("BL")) { BL_LEVEL = constrain(val.toInt(),0,255); setLEDState(desiredLedBacklight, desiredLedAnnun, desiredLed3, BL_LEVEL, desiredAnLevel); }
     else if (key.equalsIgnoreCase("AN")) { AN_LEVEL = constrain(val.toInt(),0,255); setLEDState(desiredLedBacklight, desiredLedAnnun, desiredLed3, desiredBlLevel, AN_LEVEL); }
-    else if (key.equalsIgnoreCase("DISP_BL")) { DISP_BL_LEVEL = constrain(val.toInt(),0,15); }
+    else if (key.equalsIgnoreCase("DISP_BL") || key.equalsIgnoreCase("DSP_BL")) { DISP_BL_LEVEL = constrain(val.toInt(),0,15); }
     else if (key.equalsIgnoreCase("SMO_THR")) { SMO_THRESHOLD = constrain(val.toInt(), 1, 100); }
     else if (key.equalsIgnoreCase("SMO_SAM")) { SMO_SAMPLES = constrain(val.toInt(), 1, 8); }
     else if (key.equalsIgnoreCase("SMO_DLY")) { SMO_DELAY_US = constrain(val.toInt(), 50, 1000); }

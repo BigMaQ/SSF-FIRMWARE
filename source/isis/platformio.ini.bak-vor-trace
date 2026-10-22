@@ -1,0 +1,63 @@
+; ============================================================================
+;  A320 ISIS — own firmware (no MobiFlight), Guition ESP32-4848S040
+;  PlatformIO project.  Build: pio run -e esp32s3      Tests: pio test -e native
+;
+;  See docs/ISIS_FIRMWARE_SPEC.md in the firmware repo.
+;  Display code is taken from CC_ISIS (MIT, Copyright (c) 2024 Chris Crawford /
+;  elral, https://github.com/ccrawford/CC_ISIS) — see LICENSE_CC_ISIS.txt.
+;
+;  NO WLAN CREDENTIALS IN HERE. SSID/password live exclusively in the NVS of
+;  the device and are entered through the captive portal (spec section 4.1).
+; ============================================================================
+
+[platformio]
+default_envs = esp32s3
+description = A320 ISIS standby instrument (ESP32-S3, 480x480, own UDP transport)
+
+[env:esp32s3]
+platform  = espressif32@^6.9.0
+board     = esp32-s3-devkitc-1
+framework = arduino
+
+; ---- N16R8: 16 MB flash, 8 MB OCTAL PSRAM, 240 MHz (spec section 11) ----
+board_build.arduino.memory_type = qio_opi
+board_build.flash_mode           = qio
+board_build.flash_size           = 16MB
+board_build.f_cpu                = 240000000L
+board_build.partitions           = partitions.csv
+board_upload.flash_size          = 16MB
+board_upload.maximum_size        = 5242880          ; 5 MB = one OTA app slot
+upload_speed                     = 921600
+monitor_speed                    = 115200
+monitor_filters                  = time, colorize
+
+build_flags =
+    -DISIS_ESP32=1
+    -DISIS_FW_VERSION=\"0.1.0\"
+    -DBOARD_HAS_PSRAM
+    -DARDUINO_USB_MODE=1
+    -DARDUINO_USB_CDC_ON_BOOT=0
+    -DCORE_DEBUG_LEVEL=1
+    -std=gnu++17
+
+lib_deps =
+    lovyan03/LovyanGFX@1.2.7
+    tzapu/WiFiManager@^2.0.17
+
+; ============================================================================
+;  Host unit tests — pure logic only (no ESP32 SDK).
+;  The transport/display/button hardware layers are behind narrow interfaces
+;  and are excluded here, so proto/displaycfg/buttons logic compiles on the PC.
+; ============================================================================
+[env:native]
+platform = native
+test_framework = unity
+test_build_src = yes
+build_src_filter =
+    +<proto.cpp>
+    +<displaycfg.cpp>
+    +<buttons.cpp>
+build_flags =
+    -std=gnu++17
+    -DISIS_NATIVE=1
+    -DUNIT_TEST=1

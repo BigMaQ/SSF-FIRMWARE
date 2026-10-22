@@ -2,3 +2,12 @@
 */
 # Keep .ino files at source root level
 !*.ino
+
+# Exception: isis is a PlatformIO project (no .ino files at all) - the whole
+# source tree is tracked, only the build artefacts stay out.
+!/isis/
+!/isis/**
+/isis/.pio/
+/isis/.pio-venv/
+/isis/.platformio/
+/isis/__pycache__/

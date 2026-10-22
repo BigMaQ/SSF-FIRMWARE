@@ -750,7 +750,7 @@ void processIncomingLine(const String &line) {
       }
       applyLEDOutputs();
     }
-    else if (key.equalsIgnoreCase("DISP_BL")) {
+    else if (key.equalsIgnoreCase("DISP_BL") || key.equalsIgnoreCase("DSP_BL")) {
       if (!hostOnline) { hostOnline = true; }  // implicit online
       setDisplayBrightness(val.toInt());
     }

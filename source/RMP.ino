@@ -1018,7 +1018,7 @@ void processIncomingLine(const char* line) {
         desiredBrightness = constrain(atoi_s(val), 0, 255);
         applyLEDOutputs();
       }
-      else if (strieq(kp, "DISP_BL")) {
+      else if (strieq(kp, "DISP_BL") || strieq(kp, "DSP_BL")) {
         setDisplayBrightness(atoi_s(val));
       }
       else if (strieq(kp, "DSP1")) {

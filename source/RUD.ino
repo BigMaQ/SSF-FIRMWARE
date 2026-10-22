@@ -439,7 +439,7 @@ void processIncomingLine(const String &line) {
       desiredAnnun = b;
       applyLEDOutputs();
     }
-    else if (key == "DISP_BL") {
+    else if (key == "DISP_BL" || key == "DSP_BL") {
       setDisplayBrightness(val.toInt());
     }
     else if (key == "DSP1") {
