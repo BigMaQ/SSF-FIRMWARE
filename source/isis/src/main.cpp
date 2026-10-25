@@ -495,9 +495,27 @@ void loop()
         }
         g_lastLink = link;
 
+        // Diagnose-Kennzeichnung (Panel-Monitor / Live-Diag): rechts neben dem
+        // Baro-Wert. Der Kohlsmann-Sprite sitzt bei (140,420) und ist 120 breit,
+        // ab x=268 ist bis zum Rand Platz. Beim Ein-/Ausschalten wird das Bild
+        // neu aufgebaut, damit das rote DIAG nicht einbrennt.
+        static bool lastDiag = false;
+        const bool diag = netDiagActive(now);
+        if (diag != lastDiag) {
+            isisState.forceRedraw = true;
+            compose = true;
+            lastDiag = diag;
+        }
+
         // Only touch the panel when the picture really changed.
         if (compose) {
             displaycfgComposite(displaycfgCurrent());
+            if (diag) {
+                lcd.setTextDatum(TL_DATUM);
+                lcd.setTextColor(TFT_RED, TFT_BLACK);
+                lcd.setTextSize(2);
+                lcd.drawString("DIAG", 272, 426);
+            }
         }
     }
 }

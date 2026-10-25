@@ -43,6 +43,14 @@ enum NetLinkStatus : uint8_t {
 };
 NetLinkStatus netLinkStatus(uint32_t nowMs);
 
+// Diagnose-Modus: solange das FDC-Werkzeug (Panel-Monitor oder Live-Diag)
+// alle 60 s ein "DIAG:1" schickt, ist der Simulator-Zustand egal — das
+// Sim-Banner verschwindet und rechts neben dem Baro-Wert steht rot DIAG.
+// Mehr als 60 s ohne neues DIAG:1 beendet den Modus (Zeitstempel laeuft aus,
+// ueberlebt also auch einen abgestuerzten Monitor).
+void netNoteDiag(uint32_t nowMs);
+bool netDiagActive(uint32_t nowMs);
+
 // true, wenn das Panel im Stationsbetrieb im WLAN haengt (nicht Setup-AP).
 bool netStaConnected();
 
@@ -63,6 +71,12 @@ const char *netLanguage();
 // Send one uplink frame to the FDC (BTN:, QNHSET:, ENC:, OTA:progress=...).
 // Does nothing while no peer is known.
 void netSendUplink(const char *frame);
+
+// Einzelantwort an eine beliebige Adresse (z. B. "IDENT:..." auf ein "VER" aus
+// dem Panel-Monitor). Laeuft ueber den Discovery-Socket — derselbe Weg, den
+// "IDENT?" -> sendBeacon() schon nimmt, und damit sicher ausserhalb des
+// Empfangspuffers des Daten-Sockets.
+void netSendTo(const IPAddress &dst, uint16_t port, const char *frame);
 
 // Remember who talks to us so uplinks can be addressed.
 void netNotePeer(uint32_t ip, uint16_t port);

@@ -47,6 +47,11 @@ DataWatchdog             g_watchdog;
 // SIM-Flag aus dem letzten Frame: -1 = noch nie gesehen (alter FDC)
 int                      g_simFlag = -1;
 
+//: Diagnose-Modus (Panel-Monitor / Live-Diag): Zeitstempel, bis zu dem er gilt.
+//: 0 = noch nie aktiv. Nach ISIS_DIAG_TIMEOUT_MS ohne neues DIAG:1 laeuft er aus.
+static uint32_t          g_diagUntilMs = 0;
+#define ISIS_DIAG_TIMEOUT_MS 60000u
+
 // Sprache des FDC fuer die Statusmeldungen (Default Englisch).
 char                     g_lang[4] = "en";
 
@@ -240,6 +245,36 @@ void handleFrame(const char *buf, const IPAddress &from, uint16_t fromPort, uint
         return;
     }
 
+    // --- Werkszeug (Panel-Monitor / Live-Diag) -------------------------------
+    // Der Payload steht hinter dem letzten '|' ("SEQ42|VER"), damit "VER" nicht
+    // in Befehlen wie "HWREVSET:2" faelschlich anschlaegt.
+    const char *payload = strrchr(buf, '|');
+    payload = payload ? payload + 1 : buf;
+
+    // "DIAG:1" kommt im Sekundentakt und haelt den Diagnose-Modus offen: kein
+    // Sim-Banner, dafuer ein rotes DIAG neben dem Baro-Wert. 60 s ohne neues
+    // DIAG:1 beenden ihn von selbst (auch wenn der Monitor abstuerzt).
+    if (strncmp(payload, "DIAG", 4) == 0) {
+        netNoteDiag(nowMs);
+        netNotePeer(ipToU32(from), fromPort);
+        g_watchdog.onData(nowMs);
+    }
+
+    // "VER" ueber UDP: der serielle Weg antwortet per Serial.printf, ueber IP
+    // kam bisher nichts zurueck — deshalb blieb der Befehl im Panel-Monitor
+    // stumm. Antwort geht direkt an den Absender, nicht an den FDC-Peer.
+    if (strcmp(payload, "VER") == 0) {
+        char ident[160];
+        snprintf(ident, sizeof(ident),
+                 "IDENT:ISIS, v%s MAQ, SN:MAC-%s;STATE:RUNNING;HWREV:%u;",
+                 ISIS_FW_VERSION, netMacSerial(), (unsigned)isisHwRev());
+        netSendTo(from, fromPort, ident);
+        netNotePeer(ipToU32(from), fromPort);
+        g_watchdog.onData(nowMs);
+        Serial.printf("[isis] VER ueber IP von %s:%u -> IDENT gesendet\n",
+                      from.toString().c_str(), (unsigned)fromPort);
+    }
+
     // --- data frame ----------------------------------------------------------
     const ProtoResult res = protoParseFrame(buf, g_values, g_cfgLayers.fdc, g_protoCtx);
 
@@ -364,8 +399,21 @@ const char *netLanguage() { return g_lang; }
 NetLinkStatus netLinkStatus(uint32_t nowMs)
 {
     if (!netOnline(nowMs))            return NET_LINK_FDC_OFFLINE;
-    if (g_simFlag == 0)               return NET_LINK_SIM_OFFLINE;
+    // Im Diagnose-Modus (Panel-Monitor / Live-Diag) ist der Sim-Zustand egal:
+    // man will das Instrument sehen, nicht das Banner.
+    if (g_simFlag == 0 && !netDiagActive(nowMs)) return NET_LINK_SIM_OFFLINE;
     return NET_LINK_OK;
+}
+
+void netNoteDiag(uint32_t nowMs)
+{
+    g_diagUntilMs = nowMs + ISIS_DIAG_TIMEOUT_MS;
+}
+
+bool netDiagActive(uint32_t nowMs)
+{
+    if (g_diagUntilMs == 0) return false;
+    return (int32_t)(g_diagUntilMs - nowMs) > 0;
 }
 bool netStaConnected()
 {
@@ -389,6 +437,18 @@ void netSendUplink(const char *frame)
     g_udpData.beginPacket(IPAddress(g_peerIp), g_peerPort);
     g_udpData.write((const uint8_t *)frame, strlen(frame));
     g_udpData.endPacket();
+}
+
+void netSendTo(const IPAddress &dst, uint16_t port, const char *frame)
+{
+    if (!frame || !*frame) return;
+    if (!g_connected) return;
+
+    // Discovery-Socket: der wird nie mitten im Datenempfang benutzt, deshalb
+    // ist Senden aus handleFrame() heraus hier unkritisch.
+    g_udpDisc.beginPacket(dst, port);
+    g_udpDisc.write((const uint8_t *)frame, strlen(frame));
+    g_udpDisc.endPacket();
 }
 
 // ---------------------------------------------------------------------------

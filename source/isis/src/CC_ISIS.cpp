@@ -655,12 +655,17 @@ void CC_ISIS::drawLS()
 
     const int16_t centerY = ATT_TOP_EDGE + ATT_HORIZON;   // Horizontlinie
 
-    // ---- Gleitpfad: senkrechte Skala rechts, Diamant laeuft hoch/runter
-    if (isisState.lsGsValid) {
-        lcd.pushImage(g_lsGsX, centerY - GSDEVIATION_IMG_HEIGHT / 2,
-                      GSDEVIATION_IMG_WIDTH, GSDEVIATION_IMG_HEIGHT,
-                      GSDEVIATION_IMG_DATA, LS_GRAU);
+    // Airbus-Verhalten: mit LS-Taste erscheinen BEIDE Skalen sofort (grau, ohne
+    // Signal). Der Diamant kommt erst mit gueltigem Empfang dazu. Vorher haengen
+    // Skala UND Diamant an lsGsValid/lsLocValid — ohne getuntes ILS blieb der
+    // Schirm also leer, obwohl LS sauber ankam ("ISIS ignoriert LS", 23.10.2026).
 
+    // ---- Gleitpfad: senkrechte Skala rechts, Diamant laeuft hoch/runter
+    lcd.pushImage(g_lsGsX, centerY - GSDEVIATION_IMG_HEIGHT / 2,
+                  GSDEVIATION_IMG_WIDTH, GSDEVIATION_IMG_HEIGHT,
+                  GSDEVIATION_IMG_DATA, LS_GRAU);
+
+    if (isisState.lsGsValid) {
         // Anschlag ist die halbe Skalenlaenge, NICHT g_lsDevFull: der Wert ist
         // Pixel pro Dot, der Weg bis zum Skalenende ist halbe Laenge minus
         // halber Diamant. Sonst klebt der Diamant schon bei einem Dot.
@@ -675,13 +680,13 @@ void CC_ISIS::drawLS()
     }
 
     // ---- Localizer: waagerechte Skala unten, Diamant laeuft links/rechts
-    if (isisState.lsLocValid) {
-        const int16_t locMitte = g_lsLocX ? (int16_t)g_lsLocX
-                                          : (int16_t)(ATT_LEFT_EDGE + ATT_WIDTH / 2);
-        lcd.pushImage(locMitte - GSDEVIATIONH_IMG_WIDTH / 2, g_lsLocTop,
-                      GSDEVIATIONH_IMG_WIDTH, GSDEVIATIONH_IMG_HEIGHT,
-                      GSDEVIATIONH_IMG_DATA, LS_GRAU);
+    const int16_t locMitte = g_lsLocX ? (int16_t)g_lsLocX
+                                      : (int16_t)(ATT_LEFT_EDGE + ATT_WIDTH / 2);
+    lcd.pushImage(locMitte - GSDEVIATIONH_IMG_WIDTH / 2, g_lsLocTop,
+                  GSDEVIATIONH_IMG_WIDTH, GSDEVIATIONH_IMG_HEIGHT,
+                  GSDEVIATIONH_IMG_DATA, LS_GRAU);
 
+    if (isisState.lsLocValid) {
         const int16_t grenzeLoc = (GSDEVIATIONH_IMG_WIDTH - DEVIATIONDIAMOND_IMG_WIDTH) / 2;
         int16_t versatz = (int16_t)lroundf(isisState.lsLocDev * g_lsDevFull);
         if (versatz >  grenzeLoc) versatz =  grenzeLoc;
