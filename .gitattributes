@@ -1,0 +1,8 @@
+# Firmware-Artefakte sind Binaerdaten - keine Zeilenende-Konvertierung.
+# Ohne diese Regel wandelt git die CRLF der .hex/.bin in LF um und die Datei
+# kommt beim Kunden rund 1 Byte pro Zeile kuerzer an als gebaut.
+*.hex   binary
+*.bin   binary
+*.elf   binary
+*.map   binary
+*.eep   binary
