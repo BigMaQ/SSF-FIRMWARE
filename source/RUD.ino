@@ -33,8 +33,8 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.4 MAQ";
-const char  FW_VERSION[] = "1.4";
+const char* PANEL_IDENT = "RUD, v1.5 MAQ";
+const char  FW_VERSION[] = "1.5";
 const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
 
@@ -280,6 +280,9 @@ void shiftOutLEDs(uint32_t bits) {
 void applyLEDOutputs() {
   // Combine free bits + backlight bits for LED2/3/4
   // In DIAG mode, bypass mask — direct full 32-bit control
+  // Die Backlight-LEDs haengen an den Bits von LED2/3/4 - ohne gesetzte
+  // Bits fliesst kein Strom, die PWM (Pin 9) dimmt nur. BL > 0 schaltet
+  // sie deshalb ein, BL 0 macht das Panel dunkel (FDC-Blanking).
   uint8_t blBits = (diagActive || desiredBacklight > 0) ? 0xFF : 0x00;
   uint32_t output;
   if (diagActive) {
@@ -434,9 +437,16 @@ void processIncomingLine(const String &line) {
     else if (key == "LED3") handleLEDToken(3, val);
     else if (key == "LED4") handleLEDToken(4, val);
     else if (key == "BL") {
-      int b = constrain(val.toInt(), 0, 255);
-      desiredBacklight = b;
-      desiredAnnun = b;
+      // BL ist NUR der Backlight-Kanal. Die Annunciator-Helligkeit laeuft
+      // ueber AN - wer hier mitdimmt, koppelt beide Regler aneinander
+      // (Fehlerbild: Annu wird mit dem Backlight dunkler).
+      desiredBacklight = constrain(val.toInt(), 0, 255);
+      applyLEDOutputs();
+    }
+    else if (key == "AN") {
+      // Annunciator-Helligkeit, eigener Kanal (Pin 10 / A10, nicht invertiert).
+      // Der FDC sendet BL und AN getrennt: FXCEO.INI [RUD] bl= / an= .
+      desiredAnnun = constrain(val.toInt(), 0, 255);
       applyLEDOutputs();
     }
     else if (key == "DISP_BL" || key == "DSP_BL") {
