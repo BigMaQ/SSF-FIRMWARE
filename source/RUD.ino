@@ -33,8 +33,8 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.5 MAQ";
-const char  FW_VERSION[] = "1.5";
+const char* PANEL_IDENT = "RUD, v1.8 MAQ";
+const char  FW_VERSION[] = "1.8";
 const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
 
@@ -294,9 +294,10 @@ void applyLEDOutputs() {
     output = (desiredLedState & 0xFF000000) | ((uint32_t)l2 << 16) | ((uint32_t)l3 << 8) | l4;
   }
   shiftOutLEDs(output);
-  // Inverted PWM: BL:0 = off, BL:255 = full brightness
+  // Beide Kanaele sind low-aktiv: 0 = dunkel, 255 = voll hell.
+  // (Gegenprobe am Panel: AN:1 war hell, AN:254 dunkel - daher 255 - Wert.)
   analogWrite(backlightPwmPin, 255 - desiredBacklight);
-  analogWrite(annunPwmPin, desiredAnnun);
+  analogWrite(annunPwmPin, 255 - desiredAnnun);
   hwLedState = output;
 }
 
@@ -357,6 +358,71 @@ unsigned long lastAnalogSendTs = 0;
 const unsigned long SEND_MIN_INTERVAL_MS = 10;
 const unsigned long ANALOG_SEND_MIN_INTERVAL_MS = 200;  // storm control: max 5 analog sends/sec
 const int POT_DEADBAND = 20;  // deadband for analog pot (was 4 — floating pins trigger noise)
+const unsigned long POT_ABTAST_MS = 2;   // ADC-Abtastung (500 Hz) - siehe Zaehlerueberlauf
+
+// ---- Floating-Erkennung fuer nicht angeschlossene Analogeingaenge --------
+// Ein floatender ADC-Pin springt bei jeder Abtastung um zig Werte und wechselt
+// dauernd die Richtung. Ein echter Poti aendert sich hoechstens um wenige LSB pro
+// Abtastung, und beim Drehen monoton in eine Richtung.
+// Ohne Abschaltung: Dauerfeuer von Statusframes (kollidiert mit jedem Panel-Scan)
+// und ein zappelndes Backlight, weil die Pot-Logik jedes Rauschen als "User dreht"
+// interpretiert.
+const int      FLOAT_DELTA            = 6;      // Sprung, der als Rauschen zaehlt
+const uint16_t FLOAT_SPANNWEITE       = 60;     // Spanne im Fenster, die floatet
+// Ein unberuehrter echter Poti liegt innerhalb +/-3. Ein floatender Pin driftet
+// saegezahnfoermig: gemessen 21 Werte pro Sekunde, Periode rund 13 s.
+const unsigned long FLOAT_FENSTER_MS  = 5000;   // Messfenster (Drift braucht Zeit)
+const unsigned long FLOAT_RECHECK_MS  = 60000;  // Recheck, wenn abgeschaltet
+const uint8_t  FLOAT_FENSTER_FUER_AUS = 2;      // so viele Fenster in Folge
+
+bool          potDisabled        = false;   // true = Analogeingang abgeschaltet (floatet)
+uint16_t      potFensterMin      = 1023;
+uint16_t      potFensterMax      = 0;
+uint32_t      potFensterSpruenge = 0;
+uint32_t      potFensterN        = 0;
+uint8_t       potFloatFenster    = 0;
+unsigned long potFensterStart    = 0;
+unsigned long potLetzteMessung   = 0;
+
+void potFensterLeeren() {
+  potFensterMin = 1023;
+  potFensterMax = 0;
+  potFensterSpruenge = 0;
+  potFensterN = 0;
+  potFensterStart = millis();
+}
+
+void potRohInsFenster(int v) {
+  static int vorher = -1;
+  potFensterN++;
+  if (v < potFensterMin) potFensterMin = v;
+  if (v > potFensterMax) potFensterMax = v;
+  if (vorher >= 0 && abs(v - vorher) > FLOAT_DELTA) potFensterSpruenge++;
+  vorher = v;
+}
+
+void potFensterAuswerten() {
+  uint16_t spanne = (potFensterMax > potFensterMin) ? (uint16_t)(potFensterMax - potFensterMin) : 0;
+  bool rauschig = (potFensterN > 50) &&
+                  (spanne > FLOAT_SPANNWEITE || potFensterSpruenge > potFensterN / 4);
+
+  if (rauschig) {
+    if (potFloatFenster < 255) potFloatFenster++;
+  } else {
+    potFloatFenster = 0;
+  }
+
+  if (!potDisabled && potFloatFenster >= FLOAT_FENSTER_FUER_AUS) {
+    potDisabled = true;
+    Serial.println("POT:FLOAT DETECT - DISABLED;");
+  } else if (potDisabled && potFloatFenster == 0) {
+    potDisabled = false;
+    Serial.println("POT:ENABLED;");
+  }
+
+  potFensterLeeren();
+  potLetzteMessung = millis();
+}
 int potValue = 0;
 int lastPotValue = 0;
 int lastSentPotValue = 0;  // separate tracking for send rate limiting
@@ -627,8 +693,8 @@ void setup() {
   initDisplay();
   setLEDState(0);
   desiredBacklight = desiredAnnun = 0;
-  analogWrite(backlightPwmPin, desiredBacklight);
-  analogWrite(annunPwmPin, desiredAnnun);
+  analogWrite(backlightPwmPin, 255 - desiredBacklight);
+  analogWrite(annunPwmPin, 255 - desiredAnnun);
   // Load EEPROM configuration
   loadHWInfo();
 
@@ -683,13 +749,43 @@ void loop() {
     sendStatus(false);  // respect SEND_MIN_INTERVAL_MS (10ms) — no force
   }
 
+  // ---------- Analogeingang: Floating-Erkennung ----------
+  // ADC nur alle POT_ABTAST_MS lesen: der Loop laeuft sonst millionenfach pro
+  // Sekunde, die Fensterzaehler laufen ueber und die Messung ist ohnehin sinnlos.
+  static int  potRoh      = 0;
+  static unsigned long potLetzteAbtastung = 0;
+  bool potNeu = (millis() - potLetzteAbtastung) >= POT_ABTAST_MS;
+  if (potNeu) {
+    potRoh = analogRead(potPin);
+    potLetzteAbtastung = millis();
+  }
+
+  if (potNeu) {
+    if (!potDisabled) {
+      // laufend messen, alle FLOAT_FENSTER_MS auswerten
+      potRohInsFenster(potRoh);
+      if ((millis() - potFensterStart) >= FLOAT_FENSTER_MS) potFensterAuswerten();
+    } else {
+      // abgeschaltet: nur einmal pro Minute ein Messfenster, sonst still
+      if ((millis() - potLetzteMessung) >= FLOAT_RECHECK_MS) {
+        potRohInsFenster(potRoh);
+        if ((millis() - potFensterStart) >= FLOAT_FENSTER_MS) potFensterAuswerten();
+      }
+    }
+  }
+
+  if (potDisabled) {
+    // Kein Statusfeuer, kein Backlight-Zucken - der letzte gueltige Wert bleibt stehen.
+    return;
+  }
+
   // Potentiometer handling (deadband + storm control)
-  potValue = analogRead(potPin);
+  potValue = potRoh;
   if (abs(potValue - lastPotValue) > POT_DEADBAND) {
     lastPotValue = potValue;
     // Map pot to backlight by default; host can override via BL command
     desiredBacklight = map(potValue, 0, 1023, 0, 255);
-    analogWrite(backlightPwmPin, desiredBacklight);
+    analogWrite(backlightPwmPin, 255 - desiredBacklight);   // low-aktiv, wie applyLEDOutputs()
     // Storm control: only send analog changes at ANALOG_SEND_MIN_INTERVAL_MS
     if (abs(potValue - lastSentPotValue) > POT_DEADBAND || (now - lastAnalogSendTs) >= ANALOG_SEND_MIN_INTERVAL_MS) {
       lastAnalogSendTs = now;
