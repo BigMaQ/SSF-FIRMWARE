@@ -33,8 +33,8 @@ const int potPin = A3;
 // ============================================================================
 // PANEL IDENTIFICATION
 // ============================================================================
-const char* PANEL_IDENT = "RUD, v1.8 MAQ";
-const char  FW_VERSION[] = "1.8";
+const char* PANEL_IDENT = "RUD, v1.10 MAQ";
+const char  FW_VERSION[] = "1.10";
 const char  PANEL_SN_PREFIX[] = "RUD-";
 bool identSent = false;
 
@@ -277,6 +277,13 @@ void shiftOutLEDs(uint32_t bits) {
   digitalWrite(ledLatchPin, HIGH);
 }
 
+// ---- Annunciator-Mindesthelligkeit --------------------------------------
+// A320-Regel: ein Annu darf nie auf 0 stehen, sonst rutscht ein FAULT/Warnung
+// im dunklen Panel durch. Untergrenze fuer den AN-Kanal (0..255).
+// Das Backlight bleibt davon unberuehrt: BL:0 schaltet LED2/3/4 stromlos,
+// damit ist "alles aus" weiterhin moeglich.
+const uint8_t AN_MINIMUM = 20;
+
 void applyLEDOutputs() {
   // Combine free bits + backlight bits for LED2/3/4
   // In DIAG mode, bypass mask — direct full 32-bit control
@@ -297,7 +304,8 @@ void applyLEDOutputs() {
   // Beide Kanaele sind low-aktiv: 0 = dunkel, 255 = voll hell.
   // (Gegenprobe am Panel: AN:1 war hell, AN:254 dunkel - daher 255 - Wert.)
   analogWrite(backlightPwmPin, 255 - desiredBacklight);
-  analogWrite(annunPwmPin, 255 - desiredAnnun);
+  // Mindesthelligkeit: nie unter AN_MINIMUM, damit kein Fault uebersehen wird
+  analogWrite(annunPwmPin, 255 - (desiredAnnun < AN_MINIMUM ? AN_MINIMUM : desiredAnnun));
   hwLedState = output;
 }
 
@@ -315,6 +323,51 @@ uint8_t lastInputState1 = 0;
 uint8_t lastInputState2 = 0;
 unsigned long lastDebounceTs = 0;
 const unsigned long DEBOUNCE_MS = 12;
+
+// ---- Stabilitaetsfilter fuer die Digitaleingaenge ------------------------
+// Ein offener Eingang am 74HC165 floatet (der 165er hat keine internen
+// Pull-ups). Ohne Filter wandert so ein Bit im Sekundentakt in die
+// Statusframes und kollidiert mit jedem Panel-Scan.
+// Ein Pegelwechsel zaehlt erst, wenn er STABIL_N_MAL hintereinander
+// gelesen wurde (Abtastung alle 5 ms -> 15 ms Bestaetigung).
+const unsigned long IN_ABTAST_MS = 5;
+const uint8_t       STABIL_N_MAL = 3;
+uint8_t  inArbeit1 = 0, inArbeit2 = 0;        // Kandidatenpegel (1 Bit je Eingang)
+uint8_t  inZaehler1[8] = {0}, inZaehler2[8] = {0};   // Bestaetigungszaehler JE BIT
+
+void stabilisiereEingaenge(uint8_t roh1, uint8_t roh2,
+                          uint8_t &stabil1, uint8_t &stabil2) {
+  // pro Bit: weicht der Rohwert vom gemerkten Kandidaten ab, Kandidat
+  // uebernehmen und Zaehler neu starten; stimmt er STABIL_N_MAL mal,
+  // gilt der Pegel als echt.
+  for (uint8_t i = 0; i < 8; i++) {
+    uint8_t m = (uint8_t)(1 << i);
+    // --- Kanal 1 ---
+    bool r1 = (roh1 & m) != 0;
+    bool a1 = (inArbeit1 & m) != 0;
+    if (r1 != a1) {
+      inArbeit1 = (uint8_t)((inArbeit1 & ~m) | (r1 ? m : 0));
+      inZaehler1[i] = 1;                 // Kandidat neu, Zaehler dieses Bits zuruecksetzen
+    } else if (inZaehler1[i] < 255) {
+      inZaehler1[i]++;
+    }
+    if (inZaehler1[i] >= STABIL_N_MAL) {
+      stabil1 = (uint8_t)((stabil1 & ~m) | (r1 ? m : 0));
+    }
+    // --- Kanal 2 ---
+    bool r2 = (roh2 & m) != 0;
+    bool a2 = (inArbeit2 & m) != 0;
+    if (r2 != a2) {
+      inArbeit2 = (uint8_t)((inArbeit2 & ~m) | (r2 ? m : 0));
+      inZaehler2[i] = 1;
+    } else if (inZaehler2[i] < 255) {
+      inZaehler2[i]++;
+    }
+    if (inZaehler2[i] >= STABIL_N_MAL) {
+      stabil2 = (uint8_t)((stabil2 & ~m) | (r2 ? m : 0));
+    }
+  }
+}
 
 void readShiftRegisters(uint8_t &in1, uint8_t &in2) {
   digitalWrite(inputLatchPin, LOW);
@@ -359,6 +412,8 @@ const unsigned long SEND_MIN_INTERVAL_MS = 10;
 const unsigned long ANALOG_SEND_MIN_INTERVAL_MS = 200;  // storm control: max 5 analog sends/sec
 const int POT_DEADBAND = 20;  // deadband for analog pot (was 4 — floating pins trigger noise)
 const unsigned long POT_ABTAST_MS = 2;   // ADC-Abtastung (500 Hz) - siehe Zaehlerueberlauf
+
+
 
 // ---- Floating-Erkennung fuer nicht angeschlossene Analogeingaenge --------
 // Ein floatender ADC-Pin springt bei jeder Abtastung um zig Werte und wechselt
@@ -414,10 +469,12 @@ void potFensterAuswerten() {
 
   if (!potDisabled && potFloatFenster >= FLOAT_FENSTER_FUER_AUS) {
     potDisabled = true;
-    Serial.println("POT:FLOAT DETECT - DISABLED;");
+    // Kanalname mitliefern: das Panel hat mehrere Pot-Eingaenge, ohne Namen
+    // ist die Meldung im Monitor nicht zuzuordnen.
+    Serial.println("POT_A3:FLOAT DETECT - DISABLED;");
   } else if (potDisabled && potFloatFenster == 0) {
     potDisabled = false;
-    Serial.println("POT:ENABLED;");
+    Serial.println("POT_A3:CLEAR - ENABLED;");
   }
 
   potFensterLeeren();
@@ -694,7 +751,8 @@ void setup() {
   setLEDState(0);
   desiredBacklight = desiredAnnun = 0;
   analogWrite(backlightPwmPin, 255 - desiredBacklight);
-  analogWrite(annunPwmPin, 255 - desiredAnnun);
+  // Mindesthelligkeit: nie unter AN_MINIMUM, damit kein Fault uebersehen wird
+  analogWrite(annunPwmPin, 255 - (desiredAnnun < AN_MINIMUM ? AN_MINIMUM : desiredAnnun));
   // Load EEPROM configuration
   loadHWInfo();
 
@@ -737,8 +795,17 @@ void loop() {
   if (diagMode == DIAG_RUNNING) { runDiag(); return; }
 
   // Inputs with debounce (respect SEND_MIN_INTERVAL_MS — no force)
-  uint8_t currentIn1, currentIn2;
-  readShiftRegisters(currentIn1, currentIn2);
+  uint8_t rohIn1, rohIn2;
+  static uint8_t stabIn1 = 0, stabIn2 = 0;
+  static unsigned long letzteInAbtastung = 0;
+  // Digitaleingaenge nur alle IN_ABTAST_MS lesen - ohne diese Drosselung
+  // bestaetigt der Filter jeden Float-Mucks in Mikrosekunden.
+  if ((millis() - letzteInAbtastung) >= IN_ABTAST_MS) {
+    letzteInAbtastung = millis();
+    readShiftRegisters(rohIn1, rohIn2);
+    stabilisiereEingaenge(rohIn1, rohIn2, stabIn1, stabIn2);
+  }
+  uint8_t currentIn1 = stabIn1, currentIn2 = stabIn2;
   bool changed = (currentIn1 != lastInputState1) || (currentIn2 != lastInputState2);
   if (changed && (now - lastDebounceTs) >= DEBOUNCE_MS) {
     lastDebounceTs = now;
