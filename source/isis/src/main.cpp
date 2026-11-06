@@ -17,10 +17,14 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 
+#include "demo.h"
+#include "align.h"
+#include "grid.h"        // Kalibrier-Testmuster        // BLANK / RESET / SHOW
 #include "CC_ISIS.h"
 #include "ISISCommon.h"
 #include "displaycanvas.h"
 #include "displaycfg.h"
+#include "imgstream.h"   // Bildstrom (GlassOut -> FDC -> UDP 5007)
 #include "net.h"
 #include "portal.h"   // isisSerialPoll(): Konsolenbefehle
 #include "Sprites/LangText.h"
@@ -182,7 +186,12 @@ void setup()
     // First full paint.
     isisState.forceRedraw = true;
     isis.update();
+    alignBegin(&displaycfgCurrent());
     displaycfgComposite(displaycfgCurrent());
+
+    // Bildstrom-Empfaenger (UDP 5007) - Puffer in PSRAM, eigener Socket.
+    // Startet im Modus "lokales Zeichnen"; erst CFG:IMG=1; schaltet um.
+    imgstreamBegin();
 
     g_lastTickMs = millis();
     Serial.println("[isis] ready");
@@ -197,11 +206,19 @@ static int g_lastLink = -1;
 
 static void drawLinkBanner(int status)
 {
+    // Ins Kompositions-Canvas `lcd` zeichnen, damit displaycfgComposite() das
+    // Banner wie das Instrument skaliert. Wer auf lcdPanel (das echte Display)
+    // malt, wird vom naechsten Composite ueberschrieben -> Flackern.
+    IsisCanvas &ziel = lcd;
     const uint16_t gruen = 0x07E0;          // PFD-Gruen
-    const int y = 196;
-    lcd.fillRect(16, y, 448, 88, TFT_BLACK);
-    lcd.drawRect(16, y, 448, 88, gruen);
-    lcd.drawRect(17, y + 1, 446, 86, gruen);
+    // Rahmen etwas kleiner als frueher (448x88): die Bitmaps werden mit
+    // Schriftgroesse 22/13 erzeugt (269x36 bzw. 135x22) und brauchen den
+    // Platz nicht mehr.
+    const int y = 202;
+    const int rahmenX = 60, rahmenW = 360, rahmenH = 78;
+    ziel.fillRect(rahmenX, y, rahmenW, rahmenH, TFT_BLACK);
+    ziel.drawRect(rahmenX, y, rahmenW, rahmenH, gruen);
+    ziel.drawRect(rahmenX + 1, y + 1, rahmenW - 2, rahmenH - 2, gruen);
 
     // Sprache folgt dem FDC (LANG:de/en/fr/th). Texte liegen als Bitmaps in
     // Flash - so sind Thai-Schrift und franzoesische Akzente korrekt, ohne
@@ -216,11 +233,11 @@ static void drawLinkBanner(int status)
     const int unterW = fdcWeg ? bsprache->fdc_sub_w : bsprache->sim_sub_w;
     const int unterH = fdcWeg ? bsprache->fdc_sub_h : bsprache->sim_sub_h;
 
-    if (hauptW <= 448 - 32) {
-        lcd.drawBitmap(240 - hauptW / 2, y + 10, haupt, hauptW, hauptH, gruen);
+    if (hauptW <= rahmenW - 24) {
+        ziel.drawBitmap(240 - hauptW / 2, y + 8, haupt, hauptW, hauptH, gruen);
     }
-    if (unterW <= 448 - 32) {
-        lcd.drawBitmap(240 - unterW / 2, y + 58, unter, unterW, unterH, gruen);
+    if (unterW <= rahmenW - 24) {
+        ziel.drawBitmap(240 - unterW / 2, y + 48, unter, unterW, unterH, gruen);
     }
 }
 
@@ -384,6 +401,11 @@ void loop()
     // ---- network: receive frames, beacon, OTA ----
     netLoop(now);
 
+    // ---- Bildstrom: Chunks abholen, reassemblieren, direkt aufs Panel ----
+    // Laeuft unabhaengig vom 20-Hz-Render-Takt: jedes ankommende Bild wird
+    // sofort gezeichnet, damit keine Frames im Taktfenster verfallen.
+    imgstreamService(now);
+
     // ---- OTA laeuft: Zeichnen aussetzen ----
     // Der SPI-Push des 480x480-Canvas bremst den Upload so stark, dass espota
     // am Ende mit "Error Uploading" abbricht. Waehrend des Schreibvorgangs
@@ -458,12 +480,43 @@ void loop()
     if ((uint32_t)(now - g_lastTickMs) >= ISIS_FRAME_INTERVAL_MS) {
         g_lastTickMs = now;
 
+        // ---- Bildstrom hat den Schirm ----
+        // Solange CFG:IMG=1 aktiv ist UND Bilder ankommen, zeichnet CC_ISIS
+        // nichts: die Pixel kommen bereits von GlassOut. Der Composite-Push
+        // wuerde mit dem Stream um denselben RGB-Bus konkurrieren (Flackern).
+        // Faellt der Strom aus (500 ms), laeuft alles unveraendert weiter wie
+        // vorher - nie ein schwarzer Schirm.
+        static bool streamZeigteBild = false;
+        if (imgstreamActive(now)) {
+            streamZeigteBild = true;
+            g_lastLink       = (int)netLinkStatus(now);
+            return;
+        }
+        if (streamZeigteBild) {
+            // Rueckfall auf lokales Zeichnen: einmal vollstaendig neu malen,
+            // sonst bliebe das letzte Stream-Bild stehen.
+            streamZeigteBild      = false;
+            isisState.forceRedraw = true;
+            g_lastLink            = -1;
+        }
+
         const SmoothSnapshot before = snapshot();
         const bool forced           = isisState.forceRedraw;
         isisState.forceRedraw       = false;
 
+        // Werkstatt-Kommando SHOW: ueberschreibt waehrend des Demo-Flugs die
+        // vom FDC kommenden Werte. Muss vor dem Zeichnen laufen.
+        demoTick(now);
+
+        // Kalibrier-Testmuster (GRID) hat Vorrang: dann wird das Instrument
+        // gar nicht erst gezeichnet. Beides jeden Frame zu malen kostet nur
+        // Rechenzeit und liesse das Muster gegen das Instrument flackern.
+        const bool kalibrier = gridActive() || alignActive();
+
         // Unchanged upstream graphics pipeline.
-        isis.update();
+        if (!kalibrier) {
+            isis.update();
+        }
 
         const SmoothSnapshot after = snapshot();
 
@@ -472,7 +525,23 @@ void loop()
         //   kein Sim  : Instrument ruhig im Hintergrund, Meldung darueber
         const int link = (int)netLinkStatus(now);
 
-        if (link == NET_LINK_FDC_OFFLINE) {
+        bool compose = forced || changed(before, after);
+
+        if (kalibrier) {
+            // Nur das Muster zeigen - keine Banner, kein DIAG-Badge.
+            // WICHTIG: nur bei echter Aenderung neu komponieren. Die Skalierung
+            // laeuft ueber pushRotateZoom (Software-Interpolation) und braucht
+            // pro 480x480-Bild mehrere hundert Millisekunden - jeden Frame
+            // gepusht blockiert das den Hauptloop und das Panel wird taub.
+            // Im Align-Modus MUSS das Raster mitgezeichnet werden, auch wenn
+            // GRID selbst nicht getoggelt wurde - es ist die Messlatte des
+            // Werkzeugs. Vorher haing es an gridActive() und war deshalb weg.
+            const bool gridNeu = gridActive() ? gridTakeRedraw() : false;
+            const bool alignNeu = alignTakeRedraw();
+            const bool neu = gridNeu || alignNeu;
+            if (neu) gridDraw();
+            compose = neu;
+        } else if (link == NET_LINK_FDC_OFFLINE) {
             // Alles aus - ein Panel ohne FDC soll nichts vortaeuschen.
             lcd.fillScreen(TFT_BLACK);
             drawLinkBanner(link);
@@ -483,7 +552,6 @@ void loop()
             isisState.forceRedraw = true;
         }
 
-        bool compose = forced || changed(before, after);
         if (link != NET_LINK_OK) {
             // Bei stehender Meldung reichen 2 Bilder/s - ein Vollbild-Push
             // kostet bei 480x480 zu viel fuer 20 Hz.
@@ -496,9 +564,9 @@ void loop()
         g_lastLink = link;
 
         // Diagnose-Kennzeichnung (Panel-Monitor / Live-Diag): rechts neben dem
-        // Baro-Wert. Der Kohlsmann-Sprite sitzt bei (140,420) und ist 120 breit,
-        // ab x=268 ist bis zum Rand Platz. Beim Ein-/Ausschalten wird das Bild
-        // neu aufgebaut, damit das rote DIAG nicht einbrennt.
+        // Baro-Wert. Das Badge wird als Sprite ins Kompositions-Canvas gepusht
+        // (isis.drawDiagBadge) - Text direkt auf `lcd` zu zeichnen laesst das
+        // Panel abstuerzen, `lcd` ist ein LGFX_Sprite mit 8-Bit-Palette.
         static bool lastDiag = false;
         const bool diag = netDiagActive(now);
         if (diag != lastDiag) {
@@ -506,16 +574,25 @@ void loop()
             compose = true;
             lastDiag = diag;
         }
+        // isis.update() hat das Canvas gerade neu gezeichnet -> Badge obendrauf.
+        if (diag) {
+            isis.drawDiagBadge(true);
+        }
+
 
         // Only touch the panel when the picture really changed.
         if (compose) {
             displaycfgComposite(displaycfgCurrent());
-            if (diag) {
-                lcd.setTextDatum(TL_DATUM);
-                lcd.setTextColor(TFT_RED, TFT_BLACK);
-                lcd.setTextSize(2);
-                lcd.drawString("DIAG", 272, 426);
-            }
+            // Der Composite leert die Raender ausserhalb des Zielrechtecks -
+            // dort liegt die Bedienleiste. Ohne dieses Neusetzen verliert sie
+            // jeder Frame ihr dirty-Flag und verschwindet bis zum naechsten
+            // Touch.
+            if (alignActive()) alignForceRedraw();
+            alignTick();
+            // SAV-Taste: die NVS-Schreibung steckt in alignTakeSaveRequest().
+            // Ohne diesen Aufruf wurde die Anfrage nur gesetzt und nie
+            // abgeholt - der Knopf tat sichtbar nichts.
+            alignTakeSaveRequest();
         }
     }
 }

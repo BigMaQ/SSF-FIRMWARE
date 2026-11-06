@@ -28,6 +28,10 @@
 #include "ISISCommon.h"   // isisState, isisSettings
 #include "buttons.h"
 #include "displaycanvas.h"
+#include "imgstream.h"   // Bildstrom-Empfaenger (UDP 5007)
+#include "demo.h"
+#include "align.h"
+#include "grid.h"        // Kalibrier-Testmuster        // BLANK / RESET / SHOW
 #include "snapshot.h"      // SHOT: Bildschirmkopie per UDP
 #include "displaycfg.h"
 
@@ -275,6 +279,27 @@ void handleFrame(const char *buf, const IPAddress &from, uint16_t fromPort, uint
                       from.toString().c_str(), (unsigned)fromPort);
     }
 
+    // --- Werkstatt-Kommandos -------------------------------------------------
+    // BLANK: Werte auf Startwerte, RESET: Panel neu booten, SHOW: 30 s Demo-Flug.
+    // Semikolon optional, damit sie sowohl von Hand als auch als Frame gehen.
+    if (strcmp(payload, "BLANK") == 0 || strcmp(payload, "BLANK;") == 0) {
+        demoBlank();
+        isisState.forceRedraw = true;
+    } else if (strcmp(payload, "RESET") == 0 || strcmp(payload, "RESET;") == 0) {
+        demoReboot();               // kehrt nicht zurueck
+    } else if (strcmp(payload, "SHOW") == 0 || strcmp(payload, "SHOW;") == 0) {
+        demoStartShow(nowMs);
+        isisState.forceRedraw = true;
+    } else if (strncmp(payload, "ALIGN", 5) == 0) {
+        // Touch-Ausrichtwerkzeug ein/aus. Bewusst tolerant: "ALIGN", "ALIGN;",
+        // "ALIGN:1" - der Touch-Werkzeug-Zustand ist ein reiner Schalter.
+        alignToggle();
+    } else if (strcmp(payload, "GRID") == 0 || strcmp(payload, "GRID;") == 0) {
+        // Kalibrier-Testmuster ein/aus (Rahmen/Sichtfenster vermessen).
+        gridToggle();
+        isisState.forceRedraw = true;
+    }
+
     // --- data frame ----------------------------------------------------------
     const ProtoResult res = protoParseFrame(buf, g_values, g_cfgLayers.fdc, g_protoCtx);
 
@@ -324,6 +349,18 @@ void handleFrame(const char *buf, const IPAddress &from, uint16_t fromPort, uint
     }
 
     applyValues(g_values, res.dspMask, nowMs);
+
+    if (res.otaDemoPresent) netSetOtaDemo(res.otaDemo);
+
+    // Bildstrom-Modus (CFG:IMG=0/1): schaltet zwischen GlassOut-Frames und
+    // lokal gezeichnetem Instrument um. Der Wechsel setzt forceRedraw, damit
+    // beim Rueckfall sofort ein vollstaendiges Bild steht.
+    if (res.imgPresent) {
+        if (res.img != imgstreamMode()) {
+            imgstreamSetMode(res.img);
+            isisState.forceRedraw = true;
+        }
+    }
 
     if (res.dispBl) {
         // DISP_BL is the base brightness from the FDC (highest priority).

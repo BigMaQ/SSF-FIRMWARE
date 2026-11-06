@@ -37,6 +37,11 @@ LGFX_Sprite alt100Sprite(&altSprite);
 
 LGFX_Sprite kohlsSprite(&lcd);
 
+// DIAG-Kennzeichnung. Der Parent MUSS im Konstruktor gesetzt werden: ohne ihn
+// ist _parent == nullptr und pushSprite(x, y) laeuft in einen Nullzeiger
+// (Guru Meditation, LoadProhibited, EXCVADDR 0x74).
+LGFX_Sprite diagSprite(&lcd);
+
 
 
 CC_ISIS::CC_ISIS()
@@ -110,6 +115,16 @@ void CC_ISIS::setupSprites()
     kohlsSprite.loadFont(A320ISIS24);
     kohlsSprite.setTextDatum(TL_DATUM);
     kohlsSprite.setTextColor(TFT_BLUE);
+
+    // DIAG-Kennzeichnung (Panel-Monitor / Live-Diag): eigener kleiner Sprite.
+    // Auf lcd ist bewusst kein Font geladen (lcd.loadFont ist auskommentiert),
+    // deshalb laeuft Text ausschliesslich ueber Sprites wie diesen.
+    diagSprite.setPsram(true);       // interner RAM ist zu klein (siehe main.cpp)
+    diagSprite.setColorDepth(8);
+    diagSprite.createSprite(76, 27);
+    diagSprite.loadFont(A320ISIS24);
+    diagSprite.setTextDatum(TL_DATUM);
+    diagSprite.setTextColor(TFT_RED);
 
     // Sichtbar machen, wenn eine Allokation scheitert: ein leerer Sprite
     // zeichnet nichts und das Display bleibt schwarz - ohne diese Zeile
@@ -696,6 +711,21 @@ void CC_ISIS::drawLS()
                       DEVIATIONDIAMOND_IMG_WIDTH, DEVIATIONDIAMOND_IMG_HEIGHT,
                       DEVIATIONDIAMOND_IMG_DATA, LS_GRAU);
     }
+}
+
+void CC_ISIS::drawDiagBadge(bool on)
+{
+    // Rechts neben dem Baro-Wert (kohlsSprite sitzt bei 140,420 und ist 120
+    // breit). Gezeichnet wird in einen eigenen Sprite und dann ins
+    // Kompositions-Canvas gepusht - Text direkt auf `lcd` (ein
+    // LGFX_Sprite mit 8-Bit-Palette) hat das Panel abstuerzen lassen.
+    if (!on) return;
+    if (diagSprite.width() <= 0) return;   // Allokation fehlgeschlagen
+
+    diagSprite.fillSprite(TFT_BLACK);
+    diagSprite.setTextColor(TFT_RED);
+    diagSprite.drawString("DIAG", 0, 0);
+    diagSprite.pushSprite(264, 422);
 }
 
 void CC_ISIS::draw()

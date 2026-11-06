@@ -115,6 +115,10 @@ struct ProtoResult {
     bool        simPresent = false; // ... und war das Feld im Frame?
     char        lang[4]  = {0};   // LANG:de/en/fr/th - Sprache des FDC
     bool        langPresent = false;
+    bool        img      = false; // CFG:IMG=1 — Bildstrom statt lokale Grafik
+    bool        imgPresent = false;
+    int         otaDemo  = -2;    // CFG:fm=<n> — Optik-Demo (0..100), -1 = aus
+    bool        otaDemoPresent = false;
 };
 
 // Parser context: remembers the last accepted sequence number.

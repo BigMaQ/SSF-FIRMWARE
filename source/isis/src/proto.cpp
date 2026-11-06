@@ -12,6 +12,13 @@
 // aus net.cpp (Hardware-Revision, siehe net.h)
 uint8_t isisHwRev();
 
+// Der Host-Test (pio test -e native) hat kein NVS. Ohne diesen Stub bleibt
+// protoBuildBeacon ein undefiniertes Symbol und ALLE nativen Tests scheitern
+// schon beim Linken - der Test-Env ist sonst nicht benutzbar.
+#if defined(ISIS_NATIVE)
+uint8_t isisHwRev() { return 1; }
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,9 +56,15 @@ const DspSpec kDsp[ISIS_DSP_COUNT] = {
 int protoDspIndex(const char *key)
 {
     if (!key) return -1;
+
+    // Gross-/Kleinschreibung egal: der FDC sendet "DSP1", im Panel-Monitor
+    // tippt man aber eher "dsp1". Vorher kam so ein Testbefehl stumm nicht an
+    // und die Suche ging beim Panel los statt beim Tippfehler.
+    auto up = [](char c) -> char { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; };
+
     // Exactly "DSP" + one digit 1..8.  "DSP10" must NOT be read as "DSP1"
     // (channels 9..19 are phase 2, spec section 9).
-    if (key[0] != 'D' || key[1] != 'S' || key[2] != 'P') return -1;
+    if (up(key[0]) != 'D' || up(key[1]) != 'S' || up(key[2]) != 'P') return -1;
     // "DSP1".."DSP9" (eine Ziffer) oder "DSP10".."DSP13" (zwei Ziffern).
     if (key[3] < '1' || key[3] > '9') return -1;
     const int einer = key[3] - '0';
@@ -138,6 +151,9 @@ ProtoResult protoParseFrame(const char *frame, IsisDisplayValues &values, IsisCf
                             ProtoContext &context)
 {
     ProtoResult res;
+    // Merkt sich, dass zuletzt ein CFG:-Token kam: nachfolgende key=value
+    // Tokens werden dann ebenfalls als CFG uebernommen (Toleranz-Regel).
+    bool cfgKontext = false;
 
     if (!frame) return res;
 
@@ -217,13 +233,41 @@ ProtoResult protoParseFrame(const char *frame, IsisDisplayValues &values, IsisCf
                     if (bl > 255) bl = 255;
                     values.dispBl = bl;
                     res.dispBl   = true;
+                } else if (cfgKontext && strchr(val, '=') != nullptr) {
+                    // Toleranz: "CFG:scale_w=384;scale_h=384;off_x=72;"
+                    // Ohne diese Regel werden alle Tokens nach dem ersten als
+                    // unbekannte Keys still verworfen - der Frame sieht dann
+                    // aus, als haette nur der erste Wert gewirkt (verzerrtes
+                    // Bild, Offset bleibt 0).
+                    uint32_t m = displaycfgApplyKv(cfg, val);
+                    if (m) {
+                        res.cfg        = true;
+                        res.cfgChanged = true;
+                        res.cfgMask   |= m;
+                        if (m & CFG_OTA) res.otaRequest = cfg.ota;
+                    }
                 } else if (strcmp(key, "CFG") == 0) {
+                    cfgKontext = true;
+                    // CFG:IMG=1/0 schaltet den Bildstrom (glassout-Kanal) um.
+                    // Bewusst hier und nicht in displaycfg: der Modus ist
+                    // fluechtig und gehoert nicht ins NVS.
+                    const char *img = strstr(val, "IMG=");
+                    if (img) {
+                        res.img        = (atoi(img + 4) != 0);
+                        res.imgPresent = true;
+                    }
                     // CFG:fm=1 kuendigt einen USB-/COM-Flash an: das Overlay
                     // bleibt stehen, weil ein SoC-Reset das TFT nicht loescht -
                     // der Bildschirm zeigt FLASH MODE also auch waehrend
                     // esptool den Chip im Bootloader bearbeitet.
+                    // Der Parser bleibt frei von Netz-Aufrufen: net.h ist im
+                    // Host-Test (ISIS_NATIVE) leer, ein Direktaufruf zerlegt
+                    // dort den Build. net.cpp wendet das Flag an.
                     const char *fm = strstr(val, "fm=");
-                    if (fm) netSetOtaDemo(atoi(fm + 3) ? 0 : -1);
+                    if (fm) {
+                        res.otaDemo        = atoi(fm + 3) ? 0 : -1;
+                        res.otaDemoPresent = true;
+                    }
                     uint32_t m = displaycfgApplyKv(cfg, val);
                     if (m) {
                         res.cfg        = true;
@@ -243,7 +287,8 @@ ProtoResult protoParseFrame(const char *frame, IsisDisplayValues &values, IsisCf
     // Lebenszeichen-Frame "SEQ42|SIM:0;" MUSS als OK gelten, sonst bricht
     // handleFrame ab, der Watchdog hungert und das Panel bleibt auf
     // "FDC NOT CONNECTED" stehen, obwohl der FDC sendet.
-    if (res.dspMask || res.dispBl || res.cfg || res.simPresent || res.langPresent) {
+    if (res.dspMask || res.dispBl || res.cfg || res.simPresent || res.langPresent ||
+        res.imgPresent) {
         res.status = ProtoStatus::OK;
     } else {
         res.status = oversize ? ProtoStatus::OVERSIZE : ProtoStatus::EMPTY;

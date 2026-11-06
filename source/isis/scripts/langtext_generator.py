@@ -102,7 +102,10 @@ def main() -> None:
 
     for sprache, texte in SPRACHEN.items():
         for feld in FELDER:
-            groesse = 26 if "main" in feld else 16
+            # Etwas kleiner als frueher (26/16): der Rahmen wird ebenfalls
+            # kleiner, und bei 87% Display-Skalierung wirkt jede Bitmap-Zeile
+            # sonst groesser als beabsichtigt.
+            groesse = 22 if "main" in feld else 13
             breite, hoehe, bild = zeichne(texte[feld], groesse)
             name = f"LANG_{sprache.upper()}_{feld.upper()}"
             zeilen.append(f'// "{texte[feld]}"  ({breite}x{hoehe})')

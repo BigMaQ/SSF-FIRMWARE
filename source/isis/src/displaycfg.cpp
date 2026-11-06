@@ -318,6 +318,20 @@ void displaycfgComposite(const IsisCfg &cfg)
     const float dstX = (float)cfg.offX + (float)cfg.scaleW / 2.0f;
     const float dstY = (float)cfg.offY + (float)cfg.scaleH / 2.0f;
 
+    // pushRotateZoom() beschreibt NUR das Zielrechteck - der Rest des Panels
+    // behaelt das vorherige Bild. Ohne dieses Leeren wird das neue, kleinere
+    // Bild ueber das alte, grosse gemalt und beide sind gleichzeitig zu sehen.
+    // Nur die vier Randstreifen fuellen, nicht das ganze Display: ein
+    // fillScreen() wuerde als schwarzes Aufblitzen sichtbar.
+    const int x0 = cfg.offX;
+    const int y0 = cfg.offY;
+    const int x1 = x0 + cfg.scaleW;
+    const int y1 = y0 + cfg.scaleH;
+    if (y0 > 0)             lcdPanel.fillRect(0, 0, 480, y0, TFT_BLACK);
+    if (y1 < 480)           lcdPanel.fillRect(0, y1, 480, 480 - y1, TFT_BLACK);
+    if (x0 > 0)             lcdPanel.fillRect(0, y0, x0, cfg.scaleH, TFT_BLACK);
+    if (x1 < 480)           lcdPanel.fillRect(x1, y0, 480 - x1, cfg.scaleH, TFT_BLACK);
+
     lcd.pushRotateZoom(&lcdPanel, dstX, dstY, 0.0f, zoomX, zoomY);
 }
 

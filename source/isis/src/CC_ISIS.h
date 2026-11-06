@@ -16,6 +16,12 @@ public:
 
     void update();
 
+    // Diagnose-Kennzeichnung (Panel-Monitor / Live-Diag) rechts neben dem
+    // Baro-Wert. Bewusst als Sprite: auf lcd ist KEIN Font geladen
+    // (lcd.loadFont(A320ISIS24) steht auskommentiert), ein lcd.drawString mit
+    // setTextSize hat das Panel beim FDC-Start zum Absturz gebracht.
+    void drawDiagBadge(bool on);
+
 private:
     bool _initialized;
 
