@@ -59,13 +59,13 @@ from PySide6.QtGui import QImage, QPainter, QPen, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 try:                                     # als Paket (Tests)
-    from tools.panel_diag import (DiagMonitor, diag_zeichnen, ota_popup,
-                                  ota_stand, ota_text, setup_hinweis,
-                                  setup_zeichnen, unavail_zeichnen)
+    from tools.panel_diag import (DiagMonitor, diag_zeichnen, os_stand,
+                                  ota_popup, ota_stand, setup_hinweis,
+                                  setup_zeichnen, status_popup, unavail_zeichnen)
 except ImportError:                      # als Skript gestartet
-    from panel_diag import (DiagMonitor, diag_zeichnen, ota_popup, ota_stand,
-                            ota_text, setup_hinweis, setup_zeichnen,
-                            unavail_zeichnen)
+    from panel_diag import (DiagMonitor, diag_zeichnen, os_stand, ota_popup,
+                            ota_stand, setup_hinweis, setup_zeichnen,
+                            status_popup, unavail_zeichnen)
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +206,18 @@ class PanelFenster(QWidget):
             # Update-Hinweis klein in die Ecke: es soll nicht wie eine Störung
             # des Panels aussehen, aber ohne Hinweis merkt niemand davon.
             from PySide6.QtGui import QColor as _QColor
-            stand = ota_stand()
-            text = ota_text(stand)
+            ota = ota_stand()
+            os_zustand = os_stand()
+            text = status_popup(ota, os_zustand)
             if text:
-                installiert = str(stand.get("meldung") or "").lower().startswith("aktualisiert")
-                ota_popup(maler, QRectF(self.rect()), text,
-                          _QColor(61, 220, 132) if installiert else _QColor(255, 193, 7))
+                # Grün = erledigt, Rot = schiefgelaufen, sonst Gelb (läuft/wartet)
+                if "fehlgeschlagen" in text:
+                    punkt = _QColor(255, 90, 90)
+                elif "fertig" in text or "installiert" in text:
+                    punkt = _QColor(61, 220, 132)
+                else:
+                    punkt = _QColor(255, 193, 7)
+                ota_popup(maler, QRectF(self.rect()), text, punkt)
         if self.debug:
             from PySide6.QtGui import QColor, QFont
             fps = len(self._fps_fenster) / 2.0
@@ -382,12 +388,17 @@ class CanvasFenster(QWidget):
                     diag_zeichnen(maler, QRectF(self.rect()), self.monitor.werte(),
                                   fps=self.bildrate(panel_id))
                     break
-            stand = ota_stand()
-            text = ota_text(stand)
+            ota = ota_stand()
+            os_zustand = os_stand()
+            text = status_popup(ota, os_zustand)
             if text:
-                installiert = str(stand.get("meldung") or "").lower().startswith("aktualisiert")
-                ota_popup(maler, QRectF(self.rect()), text,
-                          QColor(61, 220, 132) if installiert else QColor(255, 193, 7))
+                if "fehlgeschlagen" in text:
+                    punkt = QColor(255, 90, 90)
+                elif "fertig" in text or "installiert" in text:
+                    punkt = QColor(61, 220, 132)
+                else:
+                    punkt = QColor(255, 193, 7)
+                ota_popup(maler, QRectF(self.rect()), text, punkt)
 
 
 class _Steuerung(QObject):

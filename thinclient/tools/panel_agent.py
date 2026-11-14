@@ -442,6 +442,10 @@ class System:
     def os_zustand(self) -> dict:
         return os_update.status()
 
+    def os_quittieren(self) -> dict:
+        """Neustart-Frage abhaken (FDC soll nicht wiederholt fragen)."""
+        return os_update.quittieren()
+
     def os_installieren(self) -> tuple[bool, str, dict]:
         """OS-Update anstossen (eigene Unit, damit der Agent neu starten darf)."""
         zustand = os_update.zustand_lesen()
@@ -795,6 +799,16 @@ def baue_handler(system: System, token: str, startzeit: float):
                 return self._antwort(200 if ok else 400,
                                      {"ok": ok, "meldung": meldung, "aktion": aktion})
             if pfad == "/os":
+                # Ohne Body: Update starten.  Mit {"quittiert": true}: nur die
+                # Reboot-Frage abhaken (FDC fragt sonst bei jedem Oeffnen neu).
+                try:
+                    daten = self._body()
+                except (ValueError, json.JSONDecodeError):
+                    daten = {}
+                if isinstance(daten, dict) and daten.get("quittiert"):
+                    system.os_quittieren()
+                    return self._antwort(200, {"ok": True, "meldung": "quittiert",
+                                               "os": system.os_zustand()})
                 ok, meldung, ergebnis = system.os_installieren()
                 return self._antwort(200 if ok else 500,
                                      {"ok": ok, "meldung": meldung,

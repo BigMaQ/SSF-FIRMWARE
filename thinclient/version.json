@@ -1,7 +1,7 @@
 {
-  "version": "0.9.0",
+  "version": "0.10.0",
   "datum": "2026-11-14",
-  "hinweis": "Schirm-Modi (xrandr) im Status, Begrenzung der Panelgroesse",
+  "hinweis": "OS-Update-Verlauf und Popup mit 30-s-Ausblendung, Auto-Reboot, Reboot-Quittung",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,18 +15,18 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "595478022f155088e661eb0cfb7f7b0d530a4b9e843b3941a8ef99a2824f3d47",
-      "bytes": 40447
+      "sha256": "045473deed0e63c43800a60898ba476b4c621a50e832b7af94a7d2a2cb8a5ca1",
+      "bytes": 40853
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "fc50410589a71f167eb644bf548f60b8b9d829bfca884b5e5a442a0e94798d93",
-      "bytes": 43726
+      "sha256": "24890f7dda631b1417a6d8508b7ef697a69e2b7c1c8c89860cd94dd91321bd7f",
+      "bytes": 44458
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "5c02c31c3cae6a5dfe96c016791d4af2b6ceb5ddc0e41ac8b3ae335936794336",
-      "bytes": 16555
+      "sha256": "49cdfb504ad00dc90c66080b11838766bee94af09b80cbec6cc61e97cde30eb0",
+      "bytes": 18849
     },
     {
       "pfad": "tools/panel_grab.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "dada704e5508b84beef917cb6c29308a5f120ff5339f2fc105b4cf6c11631821",
-      "bytes": 18657
+      "sha256": "e7ebc12239be0b08ac277e15e128ab8c73992a11ba2b0d8041c4a2257a50878f",
+      "bytes": 18714
     },
     {
       "pfad": "tools/geraet_ident.py",
@@ -55,8 +55,8 @@
     },
     {
       "pfad": "tools/os_update.py",
-      "sha256": "7fcff55eadabe247ed6ad9f050edeedee5d98dff2545969749400c1c675b01d9",
-      "bytes": 6656
+      "sha256": "62d9885e0c6a3bfaeb221f705fe2da488383484340d606950cf5c0a95c39d25c",
+      "bytes": 9095
     },
     {
       "pfad": "wait-for-x.sh",

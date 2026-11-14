@@ -267,7 +267,8 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
             return {**ergebnis, "installiert": False, "zurueckgerollt": True,
                     "fehler": meldung[:250]}
 
-    zustand_schreiben(state_pfad, {"verfuegbar": False,
+    zustand_schreiben(state_pfad, {"stand": time.time(),
+                                   "verfuegbar": False,
                                    "aktuell": str(manifest["version"]),
                                    "version": str(manifest["version"]),
                                    "meldung": f"aktualisiert auf {manifest['version']}",
