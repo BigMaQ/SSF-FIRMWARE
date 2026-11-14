@@ -1,7 +1,7 @@
 {
-  "version": "0.10.1",
-  "datum": "2026-11-14",
-  "hinweis": "Popup-Ausblendung greift auch bei alten Zustandsdateien",
+  "version": "0.10.2",
+  "datum": "2026-11-15",
+  "hinweis": "Hinweis Neustart noetig gelb statt gruen",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "045473deed0e63c43800a60898ba476b4c621a50e832b7af94a7d2a2cb8a5ca1",
-      "bytes": 40853
+      "sha256": "4d7cd3ba6b6aa88271d28b006287ff7ac1282da75c86dd1d3f6c28df9fb7d057",
+      "bytes": 41037
     },
     {
       "pfad": "tools/panel_agent.py",

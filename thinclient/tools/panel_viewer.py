@@ -210,9 +210,11 @@ class PanelFenster(QWidget):
             os_zustand = os_stand()
             text = status_popup(ota, os_zustand)
             if text:
-                # Grün = erledigt, Rot = schiefgelaufen, sonst Gelb (läuft/wartet)
+                # Grün = erledigt, Gelb = Handlung offen (Neustart/läuft), Rot = Fehler
                 if "fehlgeschlagen" in text:
                     punkt = _QColor(255, 90, 90)
+                elif "Neustart" in text:
+                    punkt = _QColor(255, 193, 7)
                 elif "fertig" in text or "installiert" in text:
                     punkt = _QColor(61, 220, 132)
                 else:
@@ -394,6 +396,8 @@ class CanvasFenster(QWidget):
             if text:
                 if "fehlgeschlagen" in text:
                     punkt = QColor(255, 90, 90)
+                elif "Neustart" in text:
+                    punkt = QColor(255, 193, 7)
                 elif "fertig" in text or "installiert" in text:
                     punkt = QColor(61, 220, 132)
                 else:
