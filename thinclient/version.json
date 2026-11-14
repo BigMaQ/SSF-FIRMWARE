@@ -1,7 +1,7 @@
 {
-  "version": "0.8.1",
+  "version": "0.9.0",
   "datum": "2026-11-14",
-  "hinweis": "IDENT mit ECAM UPPER/LOWER, Auto-Power-off, OS-Updates, Automatik (Dateiliste vereinheitlicht)",
+  "hinweis": "Schirm-Modi (xrandr) im Status, Begrenzung der Panelgroesse",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -20,8 +20,8 @@
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "38c3aa67aa6402d06c6e6734d1ea65fc654b55d5230102b5775278da2b196d8b",
-      "bytes": 42233
+      "sha256": "fc50410589a71f167eb644bf548f60b8b9d829bfca884b5e5a442a0e94798d93",
+      "bytes": 43726
     },
     {
       "pfad": "tools/panel_diag.py",

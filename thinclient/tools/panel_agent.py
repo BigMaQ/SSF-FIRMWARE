@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -497,17 +498,48 @@ class System:
         return ergebnis.stdout, ""
 
     def bildschirme(self) -> list:
+        """Schirme mit aktueller Auflösung **und allen Modi** (xrandr).
+
+        Die Modi sind wichtig: im Pit haengen auch aeltere 17-Zoll-Schirme ohne
+        HD, und das FDC soll die Flaeche aus einer echten Aufloesung waehlen
+        koennen statt aus einer geratenen Zahl.
+        """
         if not shutil.which("xrandr"):
             return []
-        ergebnis = subprocess.run(["xrandr", "--query"], capture_output=True,
-                                  text=True, env={**os.environ, "DISPLAY": ":0"})
-        schirme = []
+        try:
+            ergebnis = subprocess.run(["xrandr", "--query"], capture_output=True,
+                                      text=True, timeout=10,
+                                      env={**os.environ, "DISPLAY": ":0"})
+        except subprocess.SubprocessError:
+            return []
+        schirme: list = []
+        aktuell = None
         for zeile in (ergebnis.stdout or "").splitlines():
             if " connected" in zeile:
                 teile = zeile.split()
-                schirme.append({"name": teile[0],
-                                "aktiv": " primary " in zeile or "*" in zeile,
-                                "modus": next((t for t in teile if "x" in t and "+" in t), "")})
+                treffer = re.search(r"(\d+)x(\d+)\+", zeile)
+                aktuell = {"name": teile[0],
+                           "aktiv": "connected primary" in zeile,
+                           "modus": next((t for t in teile if "x" in t and "+" in t), ""),
+                           "aufloesung": (f"{treffer.group(1)}x{treffer.group(2)}"
+                                          if treffer else ""),
+                           "modi": []}
+                schirme.append(aktuell)
+                continue
+            if aktuell is None:
+                continue
+            if not zeile.startswith((" ", "\t")):
+                aktuell = None            # naechster Schirm-Abschnitt
+                continue
+            # Moduszeilen sind eingerueckt: "  1920x1080     60.00*+  50.00"
+            for marke in zeile.split():
+                if re.fullmatch(r"\d{3,5}x\d{3,5}", marke) and marke not in aktuell["modi"]:
+                    aktuell["modi"].append(marke)
+        for schirm in schirme:
+            if not schirm["aufloesung"] and schirm["modi"]:
+                schirm["aufloesung"] = schirm["modi"][0]
+            schirm["modi"].sort(key=lambda m: tuple(int(n) for n in m.split("x")),
+                                reverse=True)
         return schirme
 
 
