@@ -131,6 +131,7 @@ class PanelFenster(QWidget):
         bild = QImage.fromData(jpeg, "JPEG")
         if bild.isNull():
             return
+        bild_merken(self.panel_id)
         self._pixmap = QPixmap.fromImage(bild)
         self._bisher += 1
         self._kb_summe += len(jpeg) / 1024.0
@@ -293,6 +294,7 @@ class CanvasFenster(QWidget):
         bild = QImage.fromData(jpeg, "JPEG")
         if bild.isNull():
             return
+        bild_merken(panel_id)
         teil["pixmap"] = QPixmap.fromImage(bild)
         teil["bisher"] += 1
         teil["kb"] = teil["kb"] + len(jpeg) / 1024.0
@@ -709,6 +711,27 @@ def layout_aus_argumenten(argv: list[str]) -> Layout:
             offset_x=args.offset_x[i] if i < len(args.offset_x) else 0,
             offset_y=args.offset_y[i] if i < len(args.offset_y) else 0))
     return layout
+
+
+#: Das Auto-Power-off (fdc-poweroff.service) fragt hier nach, ob noch Bilder
+#: kommen.  Bewusst /tmp: der Viewer laeuft als ``ssf`` und darf in /run nichts
+#: anlegen.  Geschrieben wird hoechstens alle 5 s, nicht pro Frame.
+STREAM_STATE = "/tmp/fdc-stream.json"
+_letzte_merkung = 0.0
+
+
+def bild_merken(panel: str = "") -> None:
+    """Letztes ankommendes Bild vermerken (fuer Auto-Power-off)."""
+    global _letzte_merkung
+    jetzt = time.time()
+    if jetzt - _letzte_merkung < 5.0:
+        return
+    _letzte_merkung = jetzt
+    try:
+        with open(STREAM_STATE, "w", encoding="utf-8") as datei:
+            json.dump({"letztes_bild": jetzt, "panel": panel}, datei)
+    except OSError:
+        pass
 
 
 def _leinwand_bauen(layout: Layout, steuerung: _Steuerung, schirme,

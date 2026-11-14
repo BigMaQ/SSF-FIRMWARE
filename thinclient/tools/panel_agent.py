@@ -35,10 +35,24 @@ from typing import Optional
 
 VERSION = "1.0.0"
 STANDARD_LAYOUT = "/etc/fdc/panels.json"
+#: Geraete-Identitaet: Name + Zuordnung "Monitor 1/2 -> bis zu 2 Panels".
+STANDARD_GERAET = "/etc/fdc/geraet.json"
+
+try:                                    # als Paket (Tests, FDC-Tools)
+    from tools import os_update, power_idle
+    from tools.geraet_ident import (anzeigename, geraet_aus_layout, ident_text,
+                                    mac_kuerzel, layout_aus_geraet, seriennummer,
+                                    standard_name)
+except ImportError:                     # direkt aus /opt/fdc/tools gestartet
+    import os_update, power_idle                                        # type: ignore
+    from geraet_ident import (anzeigename, geraet_aus_layout, ident_text,  # type: ignore
+                              mac_kuerzel, layout_aus_geraet, seriennummer,
+                              standard_name)
 STANDARD_TOKEN = "/etc/fdc/agent.token"
 STANDARD_UNIT = "fdc-panel"
 #: OTA-Zustand (vom Dienst fdc-ota geschrieben) — Anzeige im FDC und Popup am Client.
 OTA_STATE = "/run/fdc-ota.json"
+OS_LOG = "/var/log/fdc-os.log"
 #: Protokoll des abgekoppelten Update-Laufs.
 OTA_LOG = "/var/log/fdc-ota.log"
 
@@ -74,6 +88,64 @@ def herzschlag_schreiben(pfad: Path = HERZSCHLAG) -> None:
 # ---------------------------------------------------------------------------
 # Layout prüfen — dieselben Regeln wie der Viewer
 # ---------------------------------------------------------------------------
+def _geraet_normalisieren(geraet: object) -> dict:
+    """Geraete-Dict in feste Form bringen (nur bekannte Felder, max. 2 je Monitor)."""
+    quelle = geraet if isinstance(geraet, dict) else {}
+    ergebnis: dict = {
+        "name": str(quelle.get("name") or "").strip(),
+        "sn": str(quelle.get("sn") or "").strip(),
+        "author": str(quelle.get("author") or "MAQ").strip() or "MAQ",
+        "monitor1": [],
+        "monitor2": [],
+        "monitor1_drehen": bool(quelle.get("monitor1_drehen")),
+        "monitor2_drehen": bool(quelle.get("monitor2_drehen")),
+    }
+    if not ergebnis["name"]:
+        ergebnis["name"] = standard_name(eigene_mac())
+    gesehen: set[str] = set()
+    for monitor in ("monitor1", "monitor2"):
+        for eintrag in (quelle.get(monitor) or [])[:2]:
+            if isinstance(eintrag, str):
+                eintrag = {"panel": eintrag}
+            if not isinstance(eintrag, dict):
+                continue
+            panel = str(eintrag.get("panel") or "").strip()
+            if not panel or panel in gesehen:
+                continue
+            gesehen.add(panel)
+            sauber: dict = {"panel": panel}
+            try:
+                dreh = int(eintrag.get("rotate") or 0)
+            except (TypeError, ValueError):
+                dreh = 0
+            if dreh:
+                sauber["rotate"] = dreh
+            ergebnis[monitor].append(sauber)
+    return ergebnis
+
+
+def pruefe_geraet(roh: object) -> dict:
+    """Body von ``PUT /geraet`` pruefen.  Raise ``ValueError`` bei Unsinn."""
+    if not isinstance(roh, dict):
+        raise ValueError("Geraet muss ein JSON-Objekt sein")
+    for monitor in ("monitor1", "monitor2"):
+        eintraege = roh.get(monitor)
+        if eintraege is None:
+            continue
+        if not isinstance(eintraege, list):
+            raise ValueError(f"{monitor} muss eine Liste sein")
+        if len(eintraege) > 2:
+            raise ValueError(f"{monitor}: hoechstens 2 Panels")
+        for eintrag in eintraege:
+            panel = eintrag if isinstance(eintrag, str) else (eintrag or {}).get("panel") if isinstance(eintrag, dict) else None
+            if not str(panel or "").strip():
+                raise ValueError(f"{monitor}: Eintrag ohne Panel-Namen")
+    geraet = _geraet_normalisieren(roh)
+    if not geraet["monitor1"] and not geraet["monitor2"]:
+        raise ValueError("mindestens ein Panel zuordnen")
+    return geraet
+
+
 def pruefe_layout(daten) -> dict:
     """Wirft ``ValueError`` bei Unsinn, gibt das normalisierte Layout zurück."""
     if not isinstance(daten, dict):
@@ -191,9 +263,11 @@ def pruefe_layout(daten) -> dict:
 class System:
     """Dünne Hülle um systemctl & Co.  Im Test durch Attrappen ersetzt."""
 
-    def __init__(self, unit: str, layout_pfad: str) -> None:
+    def __init__(self, unit: str, layout_pfad: str,
+                 geraet_pfad: str = STANDARD_GERAET) -> None:
         self.unit = unit
         self.layout_pfad = Path(layout_pfad)
+        self.geraet_pfad = Path(geraet_pfad)
         # Läuft der Agent als normaler Benutzer (so ist er gedacht), braucht er
         # für systemctl ein enges sudo-Recht.  Als root entfällt das Präfix.
         self._praefix: list[str] = []
@@ -241,6 +315,36 @@ class System:
         tmp.write_text(json.dumps(daten, indent=2, ensure_ascii=False) + "\n",
                        encoding="utf-8")
         tmp.replace(self.layout_pfad)
+
+    # -- Geraete-Identitaet ------------------------------------------------
+    def geraet_lesen(self) -> dict:
+        """Name + Monitor-Zuordnung.  Fehlt die Datei, aus dem Layout ableiten.
+
+        So hat ein bereits eingerichteter Client ohne Zutun eine Identitaet —
+        die Firmware bleibt universell, das Geraet erfaehrt vom FDC, wer es ist.
+        """
+        try:
+            roh = self.geraet_pfad.read_text(encoding="utf-8-sig")
+            geraet = json.loads(roh)
+            if isinstance(geraet, dict):
+                return _geraet_normalisieren(geraet)
+        except (OSError, ValueError):
+            pass
+        return _geraet_normalisieren(geraet_aus_layout(self.layout_lesen() or {}, eigene_mac()))
+
+    def geraet_schreiben(self, geraet: dict) -> None:
+        daten = _geraet_normalisieren(geraet)
+        self.geraet_pfad.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.geraet_pfad.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(daten, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.geraet_pfad)
+
+    def ident(self) -> str:
+        """IDENT-String im Format der seriellen Panels."""
+        return ident_text(self.geraet_lesen(), eigene_mac(), self.paket_version())
+
+    def anzeigename(self) -> str:
+        return anzeigename(self.geraet_lesen(), eigene_mac())
 
     def paket_version(self) -> str:
         """Version des installierten Client-Pakets (``/opt/fdc/VERSION``)."""
@@ -301,6 +405,77 @@ class System:
                 protokoll.close()
         return True, "Update läuft — Status über /status abfragen", {}
 
+    # -- Energie: Reboot, Shutdown, Auto-Power-off -------------------------
+    def power_lesen(self) -> dict:
+        """Konfiguration und Zustand des Auto-Power-off."""
+        return {"config": power_idle.config_lesen(),
+                "zustand": power_idle.zustand_lesen()}
+
+    def power_schreiben(self, daten: dict) -> dict:
+        cfg = power_idle.config_schreiben(daten)
+        return {"config": cfg, "zustand": power_idle.zustand_lesen()}
+
+    def power_aktion(self, aktion: str) -> tuple[bool, str]:
+        """Reboot oder Herunterfahren — **abgekoppelt** gestartet.
+
+        Wartet der Agent auf ``systemctl``, ist die Antwort weg, sobald das
+        System die Dienste beendet (der Aufrufer sieht nur einen Abbruch).
+        """
+        aktion = str(aktion or "").strip().lower()
+        if aktion in ("shutdown", "aus", "poweroff"):
+            befehl = "poweroff"
+        elif aktion in ("reboot", "neustart"):
+            befehl = "reboot"
+        else:
+            return False, "aktion muss reboot oder poweroff sein"
+        zeile = self._praefix + ["/usr/bin/systemctl", befehl]
+        try:
+            subprocess.Popen(zeile, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                             close_fds=True, start_new_session=True)
+        except OSError as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        return True, f"{befehl} ausgeloest"
+
+    # -- OS-Aktualisierungen ----------------------------------------------
+    def os_zustand(self) -> dict:
+        return os_update.status()
+
+    def os_installieren(self) -> tuple[bool, str, dict]:
+        """OS-Update anstossen (eigene Unit, damit der Agent neu starten darf)."""
+        zustand = os_update.zustand_lesen()
+        if zustand.get("laeuft"):
+            return True, "OS-Update laeuft bereits", zustand
+        os_update.zustand_schreiben({"laeuft": True, "start": time.time()})
+        befehl = self._praefix + ["/usr/bin/systemd-run", "--unit=fdc-os-install",
+                                  "--collect", "--description=FDC OS-Update",
+                                  sys.executable, "/opt/fdc/tools/os_update.py",
+                                  "--installieren"]
+        protokoll = None
+        try:
+            protokoll = open(OS_LOG, "ab", buffering=0)
+        except OSError:
+            protokoll = None
+        ziel = protokoll if protokoll is not None else subprocess.DEVNULL
+        try:
+            subprocess.Popen(befehl, stdout=ziel, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, close_fds=True)
+        except OSError as exc:
+            os_update.zustand_schreiben({"laeuft": False,
+                                         "meldung": f"{type(exc).__name__}: {exc}"})
+            return False, f"{type(exc).__name__}: {exc}", {}
+        finally:
+            if protokoll is not None:
+                protokoll.close()
+        return True, "OS-Update laeuft — Status ueber /os abfragen", {}
+
+    # -- Automatik (Firmware und OS getrennt) ------------------------------
+    def auto_lesen(self) -> dict:
+        return os_update.auto_config_lesen()
+
+    def auto_schreiben(self, daten: dict) -> dict:
+        return os_update.auto_config_schreiben(daten)
+
     def bildschirmfoto(self, schirm: int = 0) -> tuple[Optional[bytes], str]:
         """PNG des Client-Bildschirms — Grundlage für den Live-Picker im FDC.
 
@@ -356,6 +531,52 @@ def baue_handler(system: System, token: str, startzeit: float):
         def _fehler(self, code: int, text: str) -> None:
             self._antwort(code, {"ok": False, "fehler": text})
 
+        def _antwort_text(self, code: int, text: str) -> None:
+            roh = str(text).encode("utf-8", "replace")
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(roh)))
+                self.end_headers()
+                self.wfile.write(roh)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def _geraet_setzen(self) -> None:
+            """Geraete-Identitaet setzen und daraus das Layout bauen.
+
+            Damit ist die Firmware universell: der FDC sagt dem Geraet, wer es
+            ist (Name + Monitor-Zuordnung), das Geraet rechnet sich sein Layout
+            selbst aus Name, Bildschirmgroesse und Anzahl der Panels.
+            """
+            try:
+                roh = self._body()
+                geraet = pruefe_geraet(roh)
+            except (ValueError, json.JSONDecodeError) as exc:
+                return self._fehler(400, str(exc))
+            try:
+                system.geraet_schreiben(geraet)
+            except OSError as exc:
+                return self._fehler(500, f"Geraet nicht schreibbar: {exc}")
+            layout = None
+            if bool(roh.get("layout_bauen", True)):
+                alt = system.layout_lesen() or {}
+                layout = layout_aus_geraet(
+                    geraet, system.bildschirme(),
+                    engine=str(alt.get("engine") or ""),
+                    gedreht=[geraet.get("monitor1_drehen"), geraet.get("monitor2_drehen")],
+                )
+                try:
+                    system.layout_schreiben(layout)
+                except OSError as exc:
+                    return self._fehler(500, f"Layout nicht schreibbar: {exc}")
+            ok, meldung = system.neu_starten()
+            return self._antwort(200 if ok else 500,
+                                 {"ok": ok, "meldung": meldung,
+                                  "ident": system.ident(),
+                                  "anzeigename": system.anzeigename(),
+                                  "geraet": geraet, "layout": layout})
+
         def _antwort_bild(self, daten: bytes) -> None:
             """Binäre Antwort (PNG) — kein JSON."""
 
@@ -410,7 +631,30 @@ def baue_handler(system: System, token: str, startzeit: float):
                     # der FDC zeigt beides an, ohne selbst nach GitLab zu fragen.
                     "version": system.paket_version(),
                     "ota": system.ota_zustand(),
+                    # Energie + OS-Stand: das FDC zeigt beides im Client-Fenster
+                    "power": system.power_lesen(),
+                    "os": system.os_zustand(),
+                    "auto": system.auto_lesen(),
+                    # Identitaet wie bei den seriellen Panels: der FDC zeigt
+                    # Name, FW, S/N und HW-Rev aus genau diesem String.
+                    "ident": system.ident(),
+                    "anzeigename": system.anzeigename(),
+                    "geraet": system.geraet_lesen(),
                 })
+            if pfad == "/ident":
+                # Klartext wie eine serielle IDENT-Antwort — zum Vergleich im
+                # Serial Monitor und fuer einfache Pruefungen mit curl.
+                if not self._auth_ok():
+                    return self._fehler(403, "Token fehlt oder falsch")
+                return self._antwort_text(200, system.ident())
+            if pfad == "/geraet":
+                if not self._auth_ok():
+                    return self._fehler(403, "Token fehlt oder falsch")
+                return self._antwort(200, {"ok": True, "ident": system.ident(),
+                                           "anzeigename": system.anzeigename(),
+                                           "geraet": system.geraet_lesen(),
+                                           "bildschirme": system.bildschirme(),
+                                           "version": system.paket_version()})
             if pfad == "/config":
                 if not self._auth_ok():
                     return self._fehler(403, "Token fehlt oder falsch")
@@ -442,13 +686,50 @@ def baue_handler(system: System, token: str, startzeit: float):
                             except ValueError:
                                 pass
                 return self._antwort(200, {"ok": True, "log": system.journal(zeilen)})
+            if pfad == "/power":
+                if not self._auth_ok():
+                    return self._fehler(403, "Token fehlt oder falsch")
+                daten = system.power_lesen()
+                return self._antwort(200, {"ok": True, **daten,
+                                           "hostname": socket.gethostname()})
+            if pfad == "/os":
+                if not self._auth_ok():
+                    return self._fehler(403, "Token fehlt oder falsch")
+                return self._antwort(200, {"ok": True, "os": system.os_zustand(),
+                                           "auto": system.auto_lesen()})
+            if pfad == "/auto":
+                if not self._auth_ok():
+                    return self._fehler(403, "Token fehlt oder falsch")
+                return self._antwort(200, {"ok": True, "auto": system.auto_lesen()})
             return self._fehler(404, f"unbekannter Pfad {pfad}")
 
         def do_PUT(self) -> None:  # noqa: N802
             if not self._darf_schreiben():
                 return
-            if self.path.split("?")[0].rstrip("/") != "/config":
-                return self._fehler(404, "nur /config ist beschreibbar")
+            pfad = self.path.split("?")[0].rstrip("/")
+            if pfad == "/geraet":
+                return self._geraet_setzen()
+            if pfad == "/power":
+                try:
+                    daten = self._body()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    return self._fehler(400, str(exc))
+                if not isinstance(daten, dict):
+                    return self._fehler(400, "Objekt erwartet")
+                werte = system.power_schreiben(daten)
+                return self._antwort(200, {"ok": True, **werte})
+            if pfad == "/auto":
+                try:
+                    daten = self._body()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    return self._fehler(400, str(exc))
+                if not isinstance(daten, dict):
+                    return self._fehler(400, "Objekt erwartet")
+                return self._antwort(200, {"ok": True,
+                                           "auto": system.auto_schreiben(daten)})
+            if pfad != "/config":
+                return self._fehler(404,
+                                    "beschreibbar: /config, /geraet, /power, /auto")
             try:
                 roh = self._body()
                 layout = pruefe_layout(roh)
@@ -472,6 +753,21 @@ def baue_handler(system: System, token: str, startzeit: float):
                                      {"ok": ok, "meldung": meldung,
                                       "version": system.paket_version(),
                                       "ergebnis": daten})
+            if pfad == "/power":
+                try:
+                    daten = self._body()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    return self._fehler(400, str(exc))
+                aktion = str((daten or {}).get("aktion") or "").strip()
+                ok, meldung = system.power_aktion(aktion)
+                return self._antwort(200 if ok else 400,
+                                     {"ok": ok, "meldung": meldung, "aktion": aktion})
+            if pfad == "/os":
+                ok, meldung, ergebnis = system.os_installieren()
+                return self._antwort(200 if ok else 500,
+                                     {"ok": ok, "meldung": meldung,
+                                      "ergebnis": ergebnis,
+                                      "os": system.os_zustand()})
             if pfad != "/restart":
                 return self._fehler(404, "unbekannter Pfad")
             ok, meldung = system.neu_starten()
@@ -527,18 +823,31 @@ class Beacon(threading.Thread):
     """
 
     def __init__(self, port: int = 5010, intervall: float = 15.0,
-                 agent_port: int = 8790, version: str = "") -> None:
+                 agent_port: int = 8790, version: str = "",
+                 system: "System | None" = None) -> None:
         super().__init__(daemon=True, name="Beacon")
         self.version = version or VERSION
         self.port = int(port)
         self.intervall = max(2.0, float(intervall))
         self.agent_port = int(agent_port)
+        self.system = system
         self._laufen = True
 
     def text(self) -> str:
-        return (f"IDENT:{socket.gethostname()};MAC:{eigene_mac()};"
+        """Beacon-Text: meldet sich wie ein Panel mit Anzeigename und S/N."""
+        name = socket.gethostname()
+        sn = ""
+        if self.system is not None:
+            try:
+                geraet = self.system.geraet_lesen()
+                name = anzeigename(geraet, eigene_mac())
+                sn = seriennummer(geraet, eigene_mac())
+                self.version = self.system.paket_version() or self.version
+            except Exception:
+                pass
+        return (f"IDENT:{name};MAC:{eigene_mac()};"
                 f"IP:{eigene_ip()};PORT:{self.agent_port};"
-                f"FW:{self.version};HW:thinclient;")
+                f"FW:{self.version};HW:thinclient;SN:{sn};")
 
     def run(self) -> None:
         try:
@@ -570,6 +879,8 @@ def token_lesen(pfad: str) -> str:
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="FDC-Panel-Agent (Fernkonfiguration)")
     p.add_argument("--config", default=STANDARD_LAYOUT, help="Pfad der Layoutdatei")
+    p.add_argument("--geraet", default=STANDARD_GERAET,
+                   help="Pfad der Geraete-Identitaet (Name + Monitor-Zuordnung)")
     p.add_argument("--token", default=STANDARD_TOKEN, help="Pfad der Token-Datei")
     p.add_argument("--unit", default=STANDARD_UNIT, help="systemd-Unit des Viewers")
     p.add_argument("--host", default="0.0.0.0")
@@ -582,13 +893,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not token:
         print(f"[agent] WARNUNG: keine Token-Datei unter {args.token} — "
               f"der Agent ist offen für jeden im Netz!", file=sys.stderr)
-    system = System(args.unit, args.config)
+    system = System(args.unit, args.config, args.geraet)
     server = ThreadingHTTPServer((args.host, args.port),
                                  baue_handler(system, token, time.monotonic()))
     beacon = None
     if args.beacon_port:
         beacon = Beacon(port=args.beacon_port, agent_port=args.port,
-                        version=system.paket_version())
+                        version=system.paket_version(), system=system)
         beacon.start()
     print(f"[agent] hört auf {args.host}:{args.port}  unit={args.unit}  "
           f"layout={args.config}  auth={'ja' if token else 'NEIN'}"

@@ -1,7 +1,7 @@
 {
-  "version": "0.5.0",
+  "version": "0.8.0",
   "datum": "2026-11-14",
-  "hinweis": "Thin-Client 0.5.0",
+  "hinweis": "IDENT mit ECAM UPPER/LOWER, Auto-Power-off, OS-Updates, Automatik-Schalter",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,13 +15,13 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "695d93cfe6523e63bd8a4a1a3cd1ca5bb330d2e24a1c33b2159930ff06e18519",
-      "bytes": 39674
+      "sha256": "595478022f155088e661eb0cfb7f7b0d530a4b9e843b3941a8ef99a2824f3d47",
+      "bytes": 40447
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "af166d97ab56a792c35066b5ae315f9ed18a044ac3d2cceb6773cafd5016447b",
-      "bytes": 27130
+      "sha256": "38c3aa67aa6402d06c6e6734d1ea65fc654b55d5230102b5775278da2b196d8b",
+      "bytes": 42233
     },
     {
       "pfad": "tools/panel_diag.py",
@@ -40,14 +40,28 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "4aaf71448be48b1e950071e37c663b7568ccb68f49d22379ccb53b6f4cfaa687",
-      "bytes": 15941
+      "sha256": "dada704e5508b84beef917cb6c29308a5f120ff5339f2fc105b4cf6c11631821",
+      "bytes": 18657
+    },
+    {
+      "pfad": "tools/geraet_ident.py",
+      "sha256": "4db2f7ddca870a2696e84983951807471804c3cb14056d414cca0ca5eae64593",
+      "bytes": 8753
+    },
+    {
+      "pfad": "tools/power_idle.py",
+      "sha256": "19b8eb8025f0163b22f92fd74c4f1241e4862adac5f29dceeb886d85ea7e16fb",
+      "bytes": 9762
+    },
+    {
+      "pfad": "tools/os_update.py",
+      "sha256": "7fcff55eadabe247ed6ad9f050edeedee5d98dff2545969749400c1c675b01d9",
+      "bytes": 6656
     },
     {
       "pfad": "wait-for-x.sh",
       "sha256": "4d878462bd1aeac96fc13d68ee61a4aa57fd68f50d95e8506e1e7a047a93d471",
       "bytes": 364
     }
-  ],
-  "basis": "https://gitlab.pcq-online.com/BigMaQ/SSF-FIRMWARE/-/raw/main/thinclient/"
+  ]
 }

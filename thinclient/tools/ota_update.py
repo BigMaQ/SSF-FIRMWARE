@@ -31,6 +31,11 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+try:                                    # als Paket (Tests, FDC-Tools)
+    from tools import os_update
+except ImportError:                     # direkt aus /opt/fdc/tools gestartet
+    import os_update                    # type: ignore
+
 STANDARD_ZIEL = "/opt/fdc"
 STANDARD_STATE = "/run/fdc-ota.json"
 STANDARD_KONFIG = "/etc/fdc/ota.json"
@@ -308,9 +313,53 @@ class Waechter:
         # Netzaussetzer weg und niemand sieht es wieder.
         if ergebnis.get("fehler") and alt.get("verfuegbar"):
             zustand_schreiben(self.state_pfad, alt)
-            return alt
-        zustand_schreiben(self.state_pfad, ergebnis)
+            ergebnis = alt
+        else:
+            zustand_schreiben(self.state_pfad, ergebnis)
+        try:
+            self._automaten(ergebnis)
+        except Exception as exc:                        # noqa: BLE001 - nie sterben
+            print(f"[ota] Automatik: {exc}", file=sys.stderr, flush=True)
         return ergebnis
+
+    # -- Automatik: Firmware und OS getrennt -------------------------------
+    def _automaten(self, ergebnis: dict) -> None:
+        """Schalter aus ``/etc/fdc/auto.json`` ausfuehren.
+
+        ``firmware_auto``  — verfuegbares Update sofort einspielen
+        ``os_auto``        — OS-Updates hoechstens alle ``os_auto_abstand_h``
+                             Stunden einspielen (eigene Unit, damit ein
+                             Dienst-Neustart mitten im Lauf nichts abbricht)
+        Der OS-Stand wird immer mitgeschrieben, damit das FDC zeigen kann, ob
+        Sicherheitsupdates anstehen — unabhaengig von der Automatik.
+        """
+        cfg = os_update.auto_config_lesen()
+        try:
+            os_update.pruefen(schreiben=True)
+        except Exception:                                # noqa: BLE001
+            pass
+        if cfg.get("firmware_auto") and ergebnis.get("verfuegbar"):
+            print(f"[ota] Automatik: installiere {ergebnis.get('version')}", flush=True)
+            installieren(self.manifest_url, self.ziel, state_pfad=self.state_pfad)
+            return
+        if cfg.get("os_auto"):
+            stand = os_update.zustand_lesen()
+            anzahl = int(stand.get("anzahl") or 0)
+            abstand = float(cfg.get("os_auto_abstand_h") or 24.0) * 3600.0
+            letzte = float(stand.get("auto_zeit") or 0.0)
+            if anzahl > 0 and (time.time() - letzte) > abstand:
+                print(f"[ota] Automatik: {anzahl} OS-Updates einspielen", flush=True)
+                os_update.zustand_schreiben({"laeuft": True, "auto_zeit": time.time()})
+                try:
+                    subprocess.Popen(["systemd-run", "--unit=fdc-os-install",
+                                      "--collect", "--description=FDC OS-Update",
+                                      sys.executable, "/opt/fdc/tools/os_update.py",
+                                      "--installieren"],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL,
+                                     stdin=subprocess.DEVNULL, close_fds=True)
+                except OSError as exc:
+                    print(f"[ota] OS-Update nicht gestartet: {exc}", flush=True)
 
     def laufen(self) -> None:
         while self._laufen:
