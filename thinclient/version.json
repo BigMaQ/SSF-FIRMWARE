@@ -1,7 +1,7 @@
 {
-  "version": "0.10.0",
+  "version": "0.10.1",
   "datum": "2026-11-14",
-  "hinweis": "OS-Update-Verlauf und Popup mit 30-s-Ausblendung, Auto-Reboot, Reboot-Quittung",
+  "hinweis": "Popup-Ausblendung greift auch bei alten Zustandsdateien",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -25,8 +25,8 @@
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "49cdfb504ad00dc90c66080b11838766bee94af09b80cbec6cc61e97cde30eb0",
-      "bytes": 18849
+      "sha256": "ad84a69afcdc4790ad37b639226f7e6c429a12dfa7549e5babf6d33589b2b40a",
+      "bytes": 19418
     },
     {
       "pfad": "tools/panel_grab.py",

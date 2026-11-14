@@ -335,13 +335,28 @@ def paket_version(pfad: str = VERSION_DATEI) -> str:
     return text.splitlines()[0].strip() if text else ""
 
 
+def _stand_mit_dateizeit(daten: dict, pfad: Path) -> dict:
+    """Zeitstempel ergänzen: ältere Zustandsdateien haben kein ``stand``.
+
+    Ohne den könnte ein Einmal-Hinweis nie auslaufen (oder nie erscheinen) —
+    die Dateizeit ist der ehrlichste Ersatz.
+    """
+    if not daten.get("stand"):
+        try:
+            daten["dateizeit"] = pfad.stat().st_mtime
+        except OSError:
+            pass
+    return daten
+
+
 def ota_stand(pfad: str = OTA_DATEI) -> dict:
     """OTA-Zustand vom Dienst ``fdc-ota`` lesen."""
+    datei = Path(pfad)
     try:
-        daten = json.loads(Path(pfad).read_text(encoding="utf-8"))
+        daten = json.loads(datei.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return daten if isinstance(daten, dict) else {}
+    return _stand_mit_dateizeit(daten, datei) if isinstance(daten, dict) else {}
 
 
 def version_text(werte: dict) -> str:
@@ -396,7 +411,8 @@ POPUP_TIMEOUT_S = 30.0
 def _frisch(stand: dict, jetzt: Optional[float] = None) -> bool:
     """Wurde der Zustand in den letzten :data:`POPUP_TIMEOUT_S` geschrieben?"""
     try:
-        alter = (time.time() if jetzt is None else jetzt) - float(stand.get("stand") or 0)
+        stamp = stand.get("stand") or stand.get("dateizeit") or 0
+        alter = (time.time() if jetzt is None else jetzt) - float(stamp)
     except (TypeError, ValueError):
         return False
     return 0 <= alter <= POPUP_TIMEOUT_S
@@ -423,11 +439,12 @@ def ota_text(stand: dict, jetzt: Optional[float] = None) -> str:
 
 def os_stand(pfad: Path | str = OS_DATEI) -> dict:
     """OS-Update-Zustand des Clients lesen (``/run/fdc-os.json``)."""
+    datei = Path(pfad)
     try:
-        daten = json.loads(Path(pfad).read_text(encoding="utf-8"))
+        daten = json.loads(datei.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return daten if isinstance(daten, dict) else {}
+    return _stand_mit_dateizeit(daten, datei) if isinstance(daten, dict) else {}
 
 
 def os_text(stand: dict, jetzt: Optional[float] = None) -> str:
