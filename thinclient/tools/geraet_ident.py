@@ -1,0 +1,216 @@
+"""Geraete-Identitaet eines Anzeige-Clients (Thin Client / beliebiges IP-Geraet).
+
+Der Client soll sich **wie ein serielles Panel** melden: ein IDENT-String im
+gleichen Format, den FDC schon kennt::
+
+    <Name> - <Panels>, v<FW> MAQ, SN:<Seriennummer>;HWREV:<hw>;STATE:running
+
+Der Name wird aus der MAC gebildet (``Avionic-<letzte 6 Zeichen>``) und ist im
+FDC aenderbar.  Aus der Zuordnung „Monitor 1: bis zu 2 Panels, Monitor 2: bis zu
+2 Panels" entsteht sowohl der Ident *und* das Layout (``panels.json``), das der
+Agent an den Viewer gibt — die Firmware bleibt universell, das Geraet erfaehrt
+vom FDC, wer es ist.
+
+Reine Funktionen, kein Qt, kein HTTP — damit ohne Geraet pruefbar.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Optional
+
+#: Hoechstzahl Panels je Monitor.
+PANELS_JE_MONITOR = 2
+
+#: Vorsatz der Seriennummer (Thin Client).
+SN_PRAEFIX = "TC-"
+
+
+def mac_kuerzel(mac: str, laenge: int = 6) -> str:
+    """``54:48:10:E8:7B:D0`` → ``e87bd0`` (Hex, klein, ohne Trenner)."""
+    hex_zeichen = "".join(ch for ch in str(mac or "").lower() if ch in "0123456789abcdef")
+    return hex_zeichen[-laenge:] if hex_zeichen else ""
+
+
+def standard_name(mac: str) -> str:
+    """Vorschlag fuer den Geraetenamen: ``Avionic-e87bd0``."""
+    kuerzel = mac_kuerzel(mac)
+    return f"Avionic-{kuerzel}" if kuerzel else "Avionic"
+
+
+def panel_namen(geraet: dict) -> list[str]:
+    """Alle zugewiesenen Panel-IDs in Monitor-Reihenfolge, ohne Doppelte."""
+    namen: list[str] = []
+    for monitor in ("monitor1", "monitor2"):
+        for eintrag in geraet.get(monitor) or []:
+            panel = str((eintrag or {}).get("panel") or "").strip()
+            if panel and panel not in namen:
+                namen.append(panel)
+    return namen
+
+
+def ist_eacam(panel: str) -> bool:
+    return str(panel or "").strip().lower().startswith("ecam")
+
+
+#: Kurzrolle je Panel-ID — ECAM hat zwei Haelften, PFD/ND zwei Seiten.
+#: Ohne die Endung waeren ``ecam-upper`` und ``ecam-lower`` beide "ECAM" und
+#: der Anzeigename verschluckte eine der beiden (Markus: "ECAM Upper, ECAM Lower
+#: waere gut, noch abzubilden").
+ROLLE_KURZ = {
+    "pfd-captain": "PFD CPT", "pfd-fo": "PFD FO",
+    "nd-captain": "ND CPT", "nd-fo": "ND FO",
+    "ecam-upper": "ECAM UPPER", "ecam-lower": "ECAM LOWER",
+    "mcdu-captain": "MCDU CPT", "mcdu-fo": "MCDU FO",
+    "wxr": "WXR", "standby": "STBY", "dcdu": "DCDU",
+}
+
+#: Schreibweisen der Endungen (auch ``ecam_upper``, ``pfd-cpt``).
+_SEITE_KURZ = {"captain": "CPT", "cpt": "CPT", "fo": "FO", "f/o": "FO",
+               "upper": "UPPER", "up": "UPPER", "lower": "LOWER", "low": "LOWER"}
+
+
+def anzeigenamen_kuerzen(panel: str) -> str:
+    """``ecam-upper`` → ``ECAM UPPER``, ``pfd-captain`` → ``PFD CPT``."""
+    p = str(panel or "").strip().lower().replace("_", "-")
+    if not p:
+        return ""
+    if p in ROLLE_KURZ:
+        return ROLLE_KURZ[p]
+    teile = [t for t in p.split("-") if t]
+    basis = teile[0].upper()
+    seite = next((_SEITE_KURZ[t] for t in teile[1:] if t in _SEITE_KURZ), "")
+    return f"{basis} {seite}".strip()
+
+
+def rollen_text(geraet: dict) -> str:
+    """``PFD, ND`` — die Rollen fuer den Anzeigenamen/IDENT (ohne Doppelte)."""
+    rollen: list[str] = []
+    for panel in panel_namen(geraet):
+        rolle = anzeigenamen_kuerzen(panel)
+        if rolle and rolle not in rollen:
+            rollen.append(rolle)
+    return ", ".join(rollen)
+
+
+def anzeigename(geraet: dict, mac: str = "") -> str:
+    """``Avionic-e87bd0 - PFD, ECAM`` (Name wie im Panel-Tab sichtbar)."""
+    name = str(geraet.get("name") or "").strip() or standard_name(mac)
+    rollen = rollen_text(geraet)
+    return f"{name} - {rollen}" if rollen else name
+
+
+def seriennummer(geraet: dict, mac: str) -> str:
+    sn = str(geraet.get("sn") or "").strip()
+    if sn:
+        return sn
+    kuerzel = mac_kuerzel(mac)
+    return f"{SN_PRAEFIX}{kuerzel}" if kuerzel else ""
+
+
+def ident_text(geraet: dict, mac: str, version: str, hardware: str = "thinclient") -> str:
+    """IDENT-String bauen — gleiches Format wie die seriellen Panels.
+
+    Beispiel::
+
+        Avionic-e87bd0 - PFD, ECAM, v0.6.0 MAQ, SN:TC-e87bd0;HWREV:thinclient;STATE:running
+    """
+    fw = str(version or "").strip() or "?"
+    autor = str(geraet.get("author") or "MAQ").strip()
+    sn = seriennummer(geraet, mac)
+    hw = str(hardware or "thinclient").strip()
+    kopf = f"{anzeigename(geraet, mac)}, v{fw} {autor}"
+    if sn:
+        kopf += f", SN:{sn}"
+    return f"{kopf};HWREV:{hw};STATE:running"
+
+
+# --------------------------------------------------------------------------
+# Geraet aus vorhandenem Layout ableiten (Bestandsinstallationen)
+# --------------------------------------------------------------------------
+def geraet_aus_layout(layout: dict, mac: str = "", schirme: Optional[list] = None) -> dict:
+    """Ein ``panels.json`` in eine Geraete-Zuordnung uebersetzen.
+
+    Damit bekommt ein bereits eingerichteter Client ohne Zutun eine Identitaet:
+    die Panels werden nach Schirm und Position auf Monitor 1/2 verteilt.
+    """
+    geraet: dict[str, Any] = {"name": standard_name(mac), "sn": "",
+                              "monitor1": [], "monitor2": []}
+    panels = list((layout or {}).get("panels") or [])
+    if not panels:
+        return geraet
+    # Stabil sortieren: Schirm, dann x, dann y.
+    def _schluessel(eintrag: dict):
+        return (int(eintrag.get("screen") or 0), int(eintrag.get("x") or 0),
+                int(eintrag.get("y") or 0))
+
+    for eintrag in sorted(panels, key=_schluessel):
+        schirm = int(eintrag.get("screen") or 0)
+        monitor = "monitor1" if schirm <= 0 else "monitor2"
+        if len(geraet[monitor]) >= PANELS_JE_MONITOR:
+            continue
+        name = str(eintrag.get("panel") or "").strip()
+        if not name:
+            continue
+        geraet[monitor].append({"panel": name})
+    return geraet
+
+
+# --------------------------------------------------------------------------
+# Layout aus der Zuordnung bauen
+# --------------------------------------------------------------------------
+def _schirmgroesse(schirme: list, index: int) -> tuple[int, int]:
+    """Breite/Hoehe eines Schirms aus ``[{"modus": "1920x1080+0+0"}, …]``."""
+    if 0 <= index < len(schirme or []):
+        modus = str((schirme[index] or {}).get("modus") or "")
+        treffer = re.match(r"(\d+)x(\d+)", modus)
+        if treffer:
+            return int(treffer.group(1)), int(treffer.group(2))
+    return 1920, 1080
+
+
+def layout_aus_geraet(geraet: dict, schirme: Optional[list] = None,
+                      engine: str = "", fps: int = 10,
+                      gedreht: Optional[list] = None) -> dict:
+    """Aus der Monitor-Zuordnung ein ``panels.json`` bauen.
+
+    Ein Panel je Monitor fuellt den Schirm, zwei teilen ihn halb (links/rechts).
+    ``gedreht[i]`` baut Monitor *i* als gedrehte Leinwand (Hochformat-Panel,
+    z. B. ECAM oben/unten) — sonst normale Fenster.
+    """
+    schirme = list(schirme or [])
+    gedreht = list(gedreht or [])
+    layout: dict[str, Any] = {"engine": engine, "panels": []}
+    for index, monitor in enumerate(("monitor1", "monitor2")):
+        eintraege = [e for e in (geraet.get(monitor) or []) if str(e.get("panel") or "").strip()]
+        if not eintraege:
+            continue
+        breite, hoehe = _schirmgroesse(schirme, index)
+        gedreht_hier = bool(gedreht[index]) if index < len(gedreht) else False
+        if gedreht_hier:
+            # Gedrehte Leinwand: 1080x1920 bei 90° -> liegt quer auf 1920x1080.
+            dreh = int((eintraege[0] or {}).get("rotate") or 90)
+            canvas_w, canvas_h = hoehe, breite
+            if index == 0:
+                layout["canvas"] = {"width": canvas_w, "height": canvas_h,
+                                    "rotate": dreh, "screen": 0}
+            teile = len(eintraege)
+            teil_hoehe = canvas_h // teile
+            for nummer, eintrag in enumerate(eintraege):
+                layout["panels"].append({
+                    "panel": str(eintrag["panel"]).strip(),
+                    "screen": index, "x": 0, "y": nummer * teil_hoehe,
+                    "width": canvas_w, "height": teil_hoehe,
+                    "fps": int(eintrag.get("fps") or fps),
+                    "canvas": True,
+                })
+            continue
+        teile = len(eintraege)
+        teil_breite = breite // teile
+        for nummer, eintrag in enumerate(eintraege):
+            layout["panels"].append({
+                "panel": str(eintrag["panel"]).strip(),
+                "screen": index, "x": nummer * teil_breite, "y": 0,
+                "width": teil_breite, "height": hoehe,
+                "fps": int(eintrag.get("fps") or fps),
+            })
+    return layout

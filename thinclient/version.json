@@ -1,7 +1,7 @@
 {
-  "version": "0.8.0",
+  "version": "0.8.1",
   "datum": "2026-11-14",
-  "hinweis": "IDENT mit ECAM UPPER/LOWER, Auto-Power-off, OS-Updates, Automatik-Schalter",
+  "hinweis": "IDENT mit ECAM UPPER/LOWER, Auto-Power-off, OS-Updates, Automatik (Dateiliste vereinheitlicht)",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
