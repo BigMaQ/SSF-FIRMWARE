@@ -1,0 +1,53 @@
+{
+  "version": "0.4.0",
+  "datum": "2026-11-14",
+  "hinweis": "Thin-Client mit OTA, WLAN-Setup und Ausrichthilfen",
+  "dateien": [
+    {
+      "pfad": "infra/__init__.py",
+      "sha256": "e58753c304283fa99a141fbf695d7625fe5c64930ba147ae9f3fa96f55d6295d",
+      "bytes": 14
+    },
+    {
+      "pfad": "infra/panel_stream.py",
+      "sha256": "46df3d4b35b43d09d65db3311b4cc912768fc6d22d66f00fab20a16ea06863ed",
+      "bytes": 44826
+    },
+    {
+      "pfad": "tools/panel_viewer.py",
+      "sha256": "695d93cfe6523e63bd8a4a1a3cd1ca5bb330d2e24a1c33b2159930ff06e18519",
+      "bytes": 39674
+    },
+    {
+      "pfad": "tools/panel_agent.py",
+      "sha256": "af166d97ab56a792c35066b5ae315f9ed18a044ac3d2cceb6773cafd5016447b",
+      "bytes": 27130
+    },
+    {
+      "pfad": "tools/panel_diag.py",
+      "sha256": "5c02c31c3cae6a5dfe96c016791d4af2b6ceb5ddc0e41ac8b3ae335936794336",
+      "bytes": 16555
+    },
+    {
+      "pfad": "tools/panel_grab.py",
+      "sha256": "1eabd66153941d24a95f010ba0b352f049a5b87f8759f4bf39b23d742098b0e1",
+      "bytes": 2194
+    },
+    {
+      "pfad": "tools/wlan_setup.py",
+      "sha256": "68f356b4c6d47a33602b2929e2ab139b3584b078e29dee506a45b9778b669c74",
+      "bytes": 23623
+    },
+    {
+      "pfad": "tools/ota_update.py",
+      "sha256": "4aaf71448be48b1e950071e37c663b7568ccb68f49d22379ccb53b6f4cfaa687",
+      "bytes": 15941
+    },
+    {
+      "pfad": "wait-for-x.sh",
+      "sha256": "4d878462bd1aeac96fc13d68ee61a4aa57fd68f50d95e8506e1e7a047a93d471",
+      "bytes": 364
+    }
+  ],
+  "basis": "https://gitlab.pcq-online.com/BigMaQ/SSF-FIRMWARE/-/raw/main/thinclient/"
+}
