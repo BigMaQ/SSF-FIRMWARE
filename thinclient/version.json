@@ -1,7 +1,7 @@
 {
-  "version": "0.4.0",
+  "version": "0.5.0",
   "datum": "2026-11-14",
-  "hinweis": "Thin-Client mit OTA, WLAN-Setup und Ausrichthilfen",
+  "hinweis": "Thin-Client 0.5.0",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
