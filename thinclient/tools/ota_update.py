@@ -49,6 +49,46 @@ ETC_VERZEICHNIS = "/etc/fdc"
 BESITZER = ("ssf", "ssf")
 
 
+def zeit_einrichten(ziel: str = STANDARD_ZIEL,
+                    timesyncd_pfad: str = "/etc/systemd/timesyncd.conf") -> list[str]:
+    """NTP-Zeitquelle auf dem Client einrichten (läuft als root).
+
+    Warum: mit leerer CMOS-Batterie startet die Box in der Vergangenheit, und
+    ohne NTP bleibt sie dort — dann ist jedes TLS-Zertifikat „noch nicht gültig"
+    und weder OTA noch apt funktionieren. Der Router (UDM) antwortet nicht auf
+    UDP 123, deshalb stehen öffentliche Pools in der Vorlage.
+    """
+    geaendert: list[str] = []
+    quelle = Path(ziel) / "timesyncd.conf"
+    if not quelle.is_file():
+        return geaendert
+    try:
+        inhalt = quelle.read_bytes()
+    except OSError:
+        return geaendert
+    try:
+        alt = Path(timesyncd_pfad).read_bytes()
+    except OSError:
+        alt = b""
+    if alt != inhalt:
+        try:
+            Path(timesyncd_pfad).parent.mkdir(parents=True, exist_ok=True)
+            Path(timesyncd_pfad).write_bytes(inhalt)
+            os.chmod(timesyncd_pfad, 0o644)
+            geaendert.append(timesyncd_pfad)
+        except OSError:
+            pass
+    for befehl in (["systemctl", "enable", "--now", "systemd-timesyncd"],
+                   ["timedatectl", "set-ntp", "true"]):
+        try:
+            fertig = subprocess.run(befehl, capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if fertig.returncode == 0:
+            geaendert.append(" ".join(befehl[1:]))
+    return geaendert
+
+
 def rechte_reparieren(etc: str = ETC_VERZEICHNIS,
                       besitzer: tuple[str, str] = BESITZER) -> list[str]:
     """``/etc/fdc`` samt JSON-Dateien dem Agent-Benutzer geben (idempotent).
@@ -367,6 +407,8 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
     # Rechte in /etc/fdc nachziehen: der Installer legte die JSON-Dateien als
     # root an, gespeichert wird aber als ssf (sonst „Permission denied").
     rechte = rechte_reparieren()
+    # NTP einrichten (leere CMOS-Batterie ⇒ Box startet in der Vergangenheit)
+    zeit = zeit_einrichten(ziel)
     zustand_schreiben(state_pfad, {"stand": time.time(),
                                    "verfuegbar": False,
                                    "aktuell": str(manifest["version"]),
@@ -374,9 +416,10 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
                                    "meldung": f"aktualisiert auf {manifest['version']}",
                                    "units": units,
                                    "rechte": rechte,
+                                   "zeit": zeit,
                                    "fehler": ""})
     return {**ergebnis, "installiert": True, "aktuell": str(manifest["version"]),
-            "units": units, "rechte": rechte}
+            "units": units, "rechte": rechte, "zeit": zeit}
 
 
 def units_installieren(ziel: str = STANDARD_ZIEL,
@@ -546,10 +589,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                           help="sofort installieren")
     zerleger.add_argument("--rechte", action="store_true",
                           help="nur Schreibrechte in /etc/fdc reparieren (als root)")
+    zerleger.add_argument("--zeit", action="store_true",
+                          help="nur NTP-Zeitquelle einrichten (als root)")
     args = zerleger.parse_args(argv)
 
     if args.rechte:
         geaendert = rechte_reparieren()
+        print(json.dumps({"ok": True, "geaendert": geaendert}, ensure_ascii=False))
+        return 0
+
+    if args.zeit:
+        geaendert = zeit_einrichten(args.ziel)
         print(json.dumps({"ok": True, "geaendert": geaendert}, ensure_ascii=False))
         return 0
 

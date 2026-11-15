@@ -1,7 +1,7 @@
 {
-  "version": "0.12.4",
+  "version": "0.12.5",
   "datum": "2026-11-15",
-  "hinweis": "OTA sagt die Wahrheit: gescheiterte Pruefung ist kein kein-Update-noetig; Rechte-Fix /etc/fdc",
+  "hinweis": "NTP-Zeitquelle (timesyncd-Vorlage, --zeit), Rechte-Fix, ehrliche OTA-Meldung",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "8d8b98c84a3d07fc6156c14f07418eb10f2b5a5b4f850e46a9b8b1f7db2249fb",
-      "bytes": 25701
+      "sha256": "512454410797651115caab2dd51865388693374792033ebef1c06d8013babd36",
+      "bytes": 27702
     },
     {
       "pfad": "tools/geraet_ident.py",
@@ -97,6 +97,11 @@
       "pfad": "units/fdc-rechte.service",
       "sha256": "568869885b8439f25e5ba2c85df4a8e0e690ffa68ffe6b224a827c6da8093dac",
       "bytes": 748
+    },
+    {
+      "pfad": "timesyncd.conf",
+      "sha256": "faa67821c2d34827a7e406e00e2348431e18396f2efd1e2abc6cd3f499864dad",
+      "bytes": 591
     }
   ]
 }
