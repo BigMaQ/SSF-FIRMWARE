@@ -1,7 +1,7 @@
 {
-  "version": "0.12.7",
+  "version": "0.12.8",
   "datum": "2026-11-15",
-  "hinweis": "NTP neutral (oeffentliche Pools im Image, lokaler Server nur als Drop-in), Rechte-Fix, ehrliche OTA-Meldung",
+  "hinweis": "Image bleibt neutral: keine eigenen IPs (NTP-Pools, Engine leer bis das FDC zuweist)",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
