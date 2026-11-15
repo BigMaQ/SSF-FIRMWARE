@@ -16,6 +16,7 @@ Reine Funktionen, kein Qt, kein HTTP — damit ohne Geraet pruefbar.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 #: Hoechstzahl Panels je Monitor.
@@ -99,10 +100,41 @@ def anzeigename(geraet: dict, mac: str = "") -> str:
     return f"{name} - {rollen}" if rollen else name
 
 
-def seriennummer(geraet: dict, mac: str) -> str:
+#: Hier legt ``fdc-ident.service`` (root) die echte Geräte-Seriennummer ab.
+#: Nötig, weil ``/sys/class/dmi/id/product_serial`` nur für root lesbar ist und
+#: der Agent als ``ssf`` läuft.
+SERIAL_DATEI = "/etc/fdc/serial"
+
+
+def hardware_seriennummer(datei: Path | str | None = None) -> str:
+    """Seriennummer des Geräts aus ``/etc/fdc/serial`` (leer = unbekannt).
+
+    Werte wie „To Be Filled By O.E.M." sind kein Ergebnis und gelten als leer.
+    """
+    ziel = Path(datei) if datei is not None else Path(SERIAL_DATEI)
+    try:
+        wert = ziel.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    wert = wert.splitlines()[0].strip() if wert else ""
+    if not wert or wert.lower() in {"0", "none", "unknown", "default string"}:
+        return ""
+    return wert
+
+
+def seriennummer(geraet: dict, mac: str, datei: Path | str | None = None) -> str:
+    """S/N bestimmen: gesetzt (von Hand) → Gerät (SMBIOS) → aus der MAC.
+
+    Die Reihenfolge ist Absicht: was im Geräte-Eintrag steht, hat Markus selbst
+    vergeben und gewinnt deshalb; sonst gilt die echte Seriennummer vom Gehäuse;
+    erst wenn beides fehlt, wird eine aus der MAC erzeugt.
+    """
     sn = str(geraet.get("sn") or "").strip()
     if sn:
         return sn
+    echt = hardware_seriennummer(datei)
+    if echt:
+        return echt
     kuerzel = mac_kuerzel(mac)
     return f"{SN_PRAEFIX}{kuerzel}" if kuerzel else ""
 

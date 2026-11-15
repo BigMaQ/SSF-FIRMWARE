@@ -2,12 +2,13 @@
 
 Regeln — so abgestimmt mit Markus:
 
-* **Ruhe** heisst: seit ``leerlauf_min`` (Default 30) kam **kein Bild** mehr
-  *und* **kein FDC-Beacon** (UDP 5011).  Solange eines von beiden da ist, laeuft
-  keine Uhr.
-* Ist Ruhe erreicht, laeuft die Abschaltuhr: nach ``auto_off_min`` (Default 60)
-  faehrt der Client herunter.  Kommt vorher ein Bild oder ein Beacon, wird die
-  Uhr zurueckgesetzt.
+* **Eine Uhr, eine Zahl:** ``auto_off_min`` Minuten **ohne Bild und ohne
+  FDC-Beacon** (UDP 5011) ⇒ herunterfahren.  Solange eines von beiden da ist,
+  laeuft keine Uhr; kommt eines zurueck, faengt sie von vorn an.
+* Frueher lagen zwei Schwellen davor (``leerlauf_min`` *plus* Abschaltuhr).
+  Wer 2 Minuten einstellte, wartete real 32 — das war niemandem zu erklaeren
+  (Fehlerbericht Markus, 15.11.).  ``leerlauf_min`` wird nur noch gelesen und
+  gespeichert, damit alte ``power.json`` nicht kaputtgeht; es zaehlt nicht mehr.
 
 Das Programm laeuft als root (``fdc-poweroff.service``), weil es am Ende
 ``systemctl poweroff`` ruft.  Die Entscheidung selbst steckt in ``tick()`` —
@@ -117,10 +118,15 @@ def tick(jetzt: float, letztes_bild_ts: Optional[float],
          ruhe_seit: Optional[float] = None) -> dict:
     """Eine Runde der Abschaltlogik — reine Funktion.
 
-    ``ruhe_seit`` ist der Zeitpunkt, an dem die Ruhe erkannt wurde (aus der
-    Vorrunde).  Rueckgabe enthaelt ``ruhe_seit`` und ``aus_in_s`` (Sekunden bis
-    zum Herunterfahren, None = keine Uhr) sowie ``aktion`` = ``"poweroff"``,
-    wenn es jetzt so weit ist.
+    ``auto_off_min`` Minuten ohne Bild **und** ohne Beacon ⇒ ``poweroff``.
+    ``ruhe_seit`` ist der Beginn der Ruhe: der Zeitpunkt der letzten Aktivität
+    (Bild oder Beacon) — die Uhr zählt also ab „es ist gerade still geworden",
+    nicht ab „ich habe es bemerkt".  Ohne jeden Zeitstempel startet sie beim
+    ersten Durchlauf.
+
+    Rueckgabe: ``ruhe_seit``, ``aus_in_s`` (Sekunden bis zum Herunterfahren,
+    None = keine Uhr), ``wartet`` (True solange noch Aktivität da ist) und
+    ``aktion`` = ``"poweroff"``, wenn es jetzt so weit ist.
     """
     ergebnis: dict[str, Any] = {"ruhe_seit": ruhe_seit, "aus_in_s": None,
                                 "aktion": None, "an": bool(cfg.get("an", True))}
@@ -128,25 +134,21 @@ def tick(jetzt: float, letztes_bild_ts: Optional[float],
         ergebnis["ruhe_seit"] = None
         return ergebnis
 
-    leerlauf = _zahl(cfg.get("leerlauf_min"), DEFAULTS["leerlauf_min"]) * 60.0
-    gnadenfrist = _zahl(cfg.get("auto_off_min"), DEFAULTS["auto_off_min"]) * 60.0
-    if gnadenfrist <= 0:
+    frist = _zahl(cfg.get("auto_off_min"), DEFAULTS["auto_off_min"]) * 60.0
+    if frist <= 0:
         # 0 = Abschalten aus
         ergebnis["ruhe_seit"] = None
         return ergebnis
 
     aktivitaeten = [ts for ts in (letztes_bild_ts, letzter_beacon_ts) if ts]
-    letzte = max(aktivitaeten) if aktivitaeten else 0.0
-    if letzte and (jetzt - letzte) < leerlauf:
-        # Bild oder Beacon da ⇒ keine Ruhe, Uhr zuruecksetzen
-        ergebnis["ruhe_seit"] = None
-        ergebnis["rest_aktiv_s"] = round(leerlauf - (jetzt - letzte), 1)
-        return ergebnis
-
-    if ergebnis["ruhe_seit"] is None:
-        # Ruhe beginnt jetzt (oder rueckwirkend ab der letzten Aktivitaet)
-        ergebnis["ruhe_seit"] = letzte + leerlauf if letzte else jetzt
-    rest = gnadenfrist - (jetzt - float(ergebnis["ruhe_seit"]))
+    letzte = max(aktivitaeten) if aktivitaeten else None
+    if letzte is None:
+        # Nichts bekannt (kein Bild, kein Beacon) ⇒ Uhr ab jetzt
+        letzte = ergebnis["ruhe_seit"] if ergebnis["ruhe_seit"] is not None else jetzt
+    ergebnis["ruhe_seit"] = letzte
+    rest = frist - (jetzt - letzte)
+    if rest > 0 and aktivitaeten:
+        ergebnis["wartet"] = True
     ergebnis["aus_in_s"] = max(0.0, round(rest, 1))
     if rest <= 0:
         ergebnis["aktion"] = "poweroff"
@@ -246,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             ergebnis = einmal(lauscher, config_lesen())
             if ergebnis.get("aus_in_s") is not None:
-                print(f"[power] Ruhe seit {ergebnis['ruhe_seit']:.0f} — "
+                print(f"[power] kein Bild/Beacon seit {ergebnis['ruhe_seit']:.0f} — "
                       f"aus in {ergebnis['aus_in_s'] / 60:.1f} min", flush=True)
         except Exception as fehler:            # Dienst darf nicht sterben
             print(f"[power] Fehler: {fehler}", flush=True)

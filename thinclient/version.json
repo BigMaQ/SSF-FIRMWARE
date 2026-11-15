@@ -1,7 +1,7 @@
 {
-  "version": "0.10.2",
+  "version": "0.11.0",
   "datum": "2026-11-15",
-  "hinweis": "Hinweis Neustart noetig gelb statt gruen",
+  "hinweis": "Echte Seriennummer (SMBIOS) im IDENT, Auto-Aus mit einer Uhr",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -20,8 +20,8 @@
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "24890f7dda631b1417a6d8508b7ef697a69e2b7c1c8c89860cd94dd91321bd7f",
-      "bytes": 44458
+      "sha256": "79f45cb295adc49589f360c568036ab50057f2e2b0d1a9d786ef214ee987a75d",
+      "bytes": 44885
     },
     {
       "pfad": "tools/panel_diag.py",
@@ -45,13 +45,13 @@
     },
     {
       "pfad": "tools/geraet_ident.py",
-      "sha256": "4db2f7ddca870a2696e84983951807471804c3cb14056d414cca0ca5eae64593",
-      "bytes": 8753
+      "sha256": "e404e45c89d967a3daebf32dae3f312518bfcda18c9d6dfbda0c593245760ded",
+      "bytes": 10013
     },
     {
       "pfad": "tools/power_idle.py",
-      "sha256": "19b8eb8025f0163b22f92fd74c4f1241e4862adac5f29dceeb886d85ea7e16fb",
-      "bytes": 9762
+      "sha256": "41320b754d86062f9325ab7f5499d30c7f1625d16683e87b2f5961dcb36f1f79",
+      "bytes": 9978
     },
     {
       "pfad": "tools/os_update.py",
@@ -62,6 +62,11 @@
       "pfad": "wait-for-x.sh",
       "sha256": "4d878462bd1aeac96fc13d68ee61a4aa57fd68f50d95e8506e1e7a047a93d471",
       "bytes": 364
+    },
+    {
+      "pfad": "serial-erzeugen.sh",
+      "sha256": "c33681cd449778f5242b4cb53d5fb85dd3de9120c1e834188b509c0bb5af9187",
+      "bytes": 2001
     }
   ]
 }

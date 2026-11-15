@@ -340,6 +340,10 @@ class System:
         tmp.write_text(json.dumps(daten, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.geraet_pfad)
 
+    def seriennummer(self) -> str:
+        """S/N des Geräts: /etc/fdc/serial (SMBIOS), sonst aus der MAC."""
+        return seriennummer(self.geraet_lesen(), eigene_mac())
+
     def ident(self) -> str:
         """IDENT-String im Format der seriellen Panels."""
         return ident_text(self.geraet_lesen(), eigene_mac(), self.paket_version())
@@ -676,6 +680,10 @@ def baue_handler(system: System, token: str, startzeit: float):
                     "ident": system.ident(),
                     "anzeigename": system.anzeigename(),
                     "geraet": system.geraet_lesen(),
+                    # Echte S/N (SMBIOS) getrennt: das FDC schreibt sie in die
+                    # S/N-Spalte des Panel-Tabs, auch wenn im Geräte-Eintrag
+                    # nichts steht.
+                    "seriennummer": system.seriennummer(),
                 })
             if pfad == "/ident":
                 # Klartext wie eine serielle IDENT-Antwort — zum Vergleich im
