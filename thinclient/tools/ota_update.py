@@ -78,6 +78,19 @@ def zeit_einrichten(ziel: str = STANDARD_ZIEL,
             geaendert.append(timesyncd_pfad)
         except OSError:
             pass
+    # Site-eigener Zeitserver (z. B. der DC eines Homelabs) als Drop-in. Die
+    # Vorlage im Paket bleibt bewusst neutral: fremde Netze haben keinen DC.
+    lokal = Path(ziel) / "timesyncd-lokal.conf"
+    if lokal.is_file():
+        ziel_drop = Path(timesyncd_pfad).parent / "timesyncd.conf.d" / "90-lokal.conf"
+        try:
+            if not ziel_drop.is_file() or ziel_drop.read_bytes() != lokal.read_bytes():
+                ziel_drop.parent.mkdir(parents=True, exist_ok=True)
+                ziel_drop.write_bytes(lokal.read_bytes())
+                os.chmod(ziel_drop, 0o644)
+                geaendert.append(str(ziel_drop))
+        except OSError:
+            pass
     for befehl in (["systemctl", "enable", "--now", "systemd-timesyncd"],
                    ["timedatectl", "set-ntp", "true"]):
         try:

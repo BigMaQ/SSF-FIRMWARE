@@ -1,7 +1,7 @@
 {
-  "version": "0.12.6",
+  "version": "0.12.7",
   "datum": "2026-11-15",
-  "hinweis": "NTP: DC 192.168.40.160 zuerst, Pools als Fallback; Rechte-Fix; ehrliche OTA-Meldung",
+  "hinweis": "NTP neutral (oeffentliche Pools im Image, lokaler Server nur als Drop-in), Rechte-Fix, ehrliche OTA-Meldung",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "512454410797651115caab2dd51865388693374792033ebef1c06d8013babd36",
-      "bytes": 27702
+      "sha256": "3a32b5a05362971359586a141e03aa2b377937edf746cb16e8e9ff971de72ae8",
+      "bytes": 28375
     },
     {
       "pfad": "tools/geraet_ident.py",
@@ -100,8 +100,8 @@
     },
     {
       "pfad": "timesyncd.conf",
-      "sha256": "03064a8245219eb63e77bc1c551ceed6511c466ef55c5eb139fb361a5a6abd3a",
-      "bytes": 786
+      "sha256": "c35c8307105ed088b212d705a847d5ce899bf3213de049cf1116c15d32edd620",
+      "bytes": 950
     }
   ]
 }
