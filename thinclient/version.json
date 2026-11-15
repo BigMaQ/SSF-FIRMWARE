@@ -1,7 +1,7 @@
 {
-  "version": "0.12.0",
+  "version": "0.12.1",
   "datum": "2026-11-15",
-  "hinweis": "Sprache am Panel folgt dem FDC (Beacon + Geraete-Push, mit Cache), Einrichtungs-Hinweis in vier Sprachen",
+  "hinweis": "Panel-Identitaet ueber die Seriennummer (S/N auch in /geraet), keine doppelten Eintraege mehr",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -20,8 +20,8 @@
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "79cc2be0a18f868bf7df2356e7bad38135930975969d01a186d02d758851d45c",
-      "bytes": 45600
+      "sha256": "1306cfb2e521969d8757bd8736a96660c13266a3c9ecf76d6d36de729b562a11",
+      "bytes": 45682
     },
     {
       "pfad": "tools/panel_diag.py",

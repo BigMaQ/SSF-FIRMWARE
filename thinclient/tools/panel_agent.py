@@ -709,6 +709,7 @@ def baue_handler(system: System, token: str, startzeit: float):
                     return self._fehler(403, "Token fehlt oder falsch")
                 return self._antwort(200, {"ok": True, "ident": system.ident(),
                                            "anzeigename": system.anzeigename(),
+                                           "seriennummer": system.seriennummer(),
                                            "geraet": system.geraet_lesen(),
                                            "bildschirme": system.bildschirme(),
                                            "version": system.paket_version()})
