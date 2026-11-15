@@ -26,6 +26,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+try:                                    # als Paket (Tests, FDC-Tools)
+    from tools import panel_lang
+except ImportError:                     # direkt aus /opt/fdc/tools gestartet
+    try:
+        import panel_lang                                     # type: ignore
+    except ImportError:
+        panel_lang = None                                     # type: ignore
+
 BEACON_PORT = 5011
 #: Das Bild-Alter schreibt der Viewer.  Nach ``/tmp``, weil der Viewer als
 #: ``ssf`` laeuft und in ``/run`` (root, 0755) nichts anlegen darf.
@@ -215,6 +223,15 @@ def einmal(lauscher: Optional[BeaconLauscher], cfg: dict,
     alter = zustand_lesen()
     ergebnis = tick(jetzt, letztes_bild(), getattr(lauscher, "letzter", None), cfg,
                     ruhe_seit=alter.get("ruhe_seit"))
+    # Sprache aus dem Beacon merken („…;LANG:de;") — das Panel läuft damit auch
+    # dann in der richtigen Sprache, wenn das FDC beim nächsten Start fehlt.
+    try:
+        if panel_lang is not None:
+            code = panel_lang.aus_beacon(getattr(lauscher, "text", ""))
+            if code and code != panel_lang.cache_lesen():
+                panel_lang.cache_schreiben(code)
+    except Exception:                       # Sprache darf nie den Dienst kippen
+        pass
     ergebnis.update({
         "zeit": jetzt,
         "letztes_bild": letztes_bild(),

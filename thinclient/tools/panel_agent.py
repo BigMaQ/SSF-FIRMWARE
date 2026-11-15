@@ -40,12 +40,12 @@ STANDARD_LAYOUT = "/etc/fdc/panels.json"
 STANDARD_GERAET = "/etc/fdc/geraet.json"
 
 try:                                    # als Paket (Tests, FDC-Tools)
-    from tools import os_update, power_idle
+    from tools import os_update, panel_lang, power_idle
     from tools.geraet_ident import (anzeigename, geraet_aus_layout, ident_text,
                                     mac_kuerzel, layout_aus_geraet, seriennummer,
                                     standard_name)
 except ImportError:                     # direkt aus /opt/fdc/tools gestartet
-    import os_update, power_idle                                        # type: ignore
+    import os_update, panel_lang, power_idle                             # type: ignore
     from geraet_ident import (anzeigename, geraet_aus_layout, ident_text,  # type: ignore
                               mac_kuerzel, layout_aus_geraet, seriennummer,
                               standard_name)
@@ -95,6 +95,9 @@ def _geraet_normalisieren(geraet: object) -> dict:
     ergebnis: dict = {
         "name": str(quelle.get("name") or "").strip(),
         "sn": str(quelle.get("sn") or "").strip(),
+        # Sprache vom FDC: das Panel zeigt Texte in derselben Sprache (gecacht,
+        # damit es auch ohne FDC beim Start stimmt)
+        "lang": panel_lang.sprache_pruefen(quelle.get("lang")),
         "author": str(quelle.get("author") or "MAQ").strip() or "MAQ",
         "monitor1": [],
         "monitor2": [],
@@ -335,6 +338,13 @@ class System:
 
     def geraet_schreiben(self, geraet: dict) -> None:
         daten = _geraet_normalisieren(geraet)
+        # Sprache vom FDC mitschreiben: der Viewer läuft als ssf und liest den
+        # Cache, wenn das FDC beim nächsten Start nicht da ist.
+        if daten.get("lang"):
+            try:
+                panel_lang.cache_schreiben(str(daten.get("lang")))
+            except OSError:
+                pass
         self.geraet_pfad.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.geraet_pfad.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(daten, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -684,6 +694,9 @@ def baue_handler(system: System, token: str, startzeit: float):
                     # S/N-Spalte des Panel-Tabs, auch wenn im Geräte-Eintrag
                     # nichts steht.
                     "seriennummer": system.seriennummer(),
+                    # Sprache am Panel folgt dem FDC (Cache, sonst Installer)
+                    "sprache": panel_lang.als_dict(
+                        panel_lang.sprache(system.geraet_lesen())),
                 })
             if pfad == "/ident":
                 # Klartext wie eine serielle IDENT-Antwort — zum Vergleich im

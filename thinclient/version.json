@@ -1,7 +1,7 @@
 {
-  "version": "0.11.0",
+  "version": "0.12.0",
   "datum": "2026-11-15",
-  "hinweis": "Echte Seriennummer (SMBIOS) im IDENT, Auto-Aus mit einer Uhr",
+  "hinweis": "Sprache am Panel folgt dem FDC (Beacon + Geraete-Push, mit Cache), Einrichtungs-Hinweis in vier Sprachen",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,18 +15,18 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "4d7cd3ba6b6aa88271d28b006287ff7ac1282da75c86dd1d3f6c28df9fb7d057",
-      "bytes": 41037
+      "sha256": "f49dc00d5980f02a028f335368e3ed21547b9c22e22f38fada5b86c19e21a837",
+      "bytes": 44131
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "79f45cb295adc49589f360c568036ab50057f2e2b0d1a9d786ef214ee987a75d",
-      "bytes": 44885
+      "sha256": "79cc2be0a18f868bf7df2356e7bad38135930975969d01a186d02d758851d45c",
+      "bytes": 45600
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "ad84a69afcdc4790ad37b639226f7e6c429a12dfa7549e5babf6d33589b2b40a",
-      "bytes": 19418
+      "sha256": "64abcf2a2c3fcda80324c3b0f44b5890fd8d68281266ef0bcc0d4c5e2a16506d",
+      "bytes": 22654
     },
     {
       "pfad": "tools/panel_grab.py",
@@ -50,13 +50,18 @@
     },
     {
       "pfad": "tools/power_idle.py",
-      "sha256": "41320b754d86062f9325ab7f5499d30c7f1625d16683e87b2f5961dcb36f1f79",
-      "bytes": 9978
+      "sha256": "e729219969aa2495f4d9287f23b24ec2bafc2901b7e1a512d6004012f9d29d52",
+      "bytes": 10830
     },
     {
       "pfad": "tools/os_update.py",
       "sha256": "62d9885e0c6a3bfaeb221f705fe2da488383484340d606950cf5c0a95c39d25c",
       "bytes": 9095
+    },
+    {
+      "pfad": "tools/panel_lang.py",
+      "sha256": "243119800da7f2c07defb26edb1bb7e96e86e4c67390a705e11f5fb7feff98f4",
+      "bytes": 9557
     },
     {
       "pfad": "wait-for-x.sh",

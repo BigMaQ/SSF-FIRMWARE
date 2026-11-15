@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from dataclasses import dataclass, field
@@ -61,11 +62,14 @@ from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 try:                                     # als Paket (Tests)
     from tools.panel_diag import (DiagMonitor, diag_zeichnen, os_stand,
                                   ota_popup, ota_stand, setup_hinweis,
-                                  setup_zeichnen, status_popup, unavail_zeichnen)
+                                  setup_zeichnen, splash_zeichnen, status_popup,
+                                  unavail_zeichnen)
+    from tools import panel_lang
 except ImportError:                      # als Skript gestartet
     from panel_diag import (DiagMonitor, diag_zeichnen, os_stand, ota_popup,
                             ota_stand, setup_hinweis, setup_zeichnen,
-                            status_popup, unavail_zeichnen)
+                            splash_zeichnen, status_popup, unavail_zeichnen)
+    import panel_lang
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +146,19 @@ class PanelFenster(QWidget):
         self.update()
 
     def _wartemeldung(self) -> str:
-        """Text für „kein Bild" — bewusst selbsterklärend, ohne Log lesen zu müssen."""
+        """Text für „kein Bild" — in der Sprache des FDC (panel_lang)."""
+        code = panel_lang.sprache()
         if not self._letzter_frame:
-            return f"{self.panel_id}\nwarte auf erstes Bild …"
+            return f"{self.panel_id}\n{panel_lang.text('warte_erstes_bild', code)}"
         sekunden = time.monotonic() - self._letzter_frame
         if sekunden < 3.0:
             return ""
         if sekunden < 15.0:
-            return f"{self.panel_id}\nseit {sekunden:.0f} s kein Bild"
-        return (f"{self.panel_id}\nseit {sekunden:.0f} s kein Bild\n"
-                f"Panel in der Engine vorhanden?")
+            return (f"{self.panel_id}\n"
+                    f"{panel_lang.text('kein_bild_seit', code, s=f'{sekunden:.0f}')}")
+        return (f"{self.panel_id}\n"
+                f"{panel_lang.text('kein_bild_seit', code, s=f'{sekunden:.0f}')}\n"
+                f"{panel_lang.text('engine_frage', code)}")
 
     def _kein_bild_sekunden(self) -> float:
         return (time.monotonic() - self._letzter_frame) if self._letzter_frame else 0.0
@@ -197,8 +204,12 @@ class PanelFenster(QWidget):
                            str(hinweis.get("ssid") or ""),
                            str(hinweis.get("url") or ""))
         elif meldung:
+            code = panel_lang.sprache()
             unavail_zeichnen(maler, QRectF(self.rect()), self.panel_id,
-                             self._kein_bild_sekunden())
+                             self._kein_bild_sekunden(),
+                             detail=panel_lang.text("keine_daten", code,
+                                                    panel=self.panel_id),
+                             titel=panel_lang.text("unavail", code))
         elif self.diag and self.monitor is not None:
             diag_zeichnen(maler, QRectF(self.rect()), self.monitor.werte(),
                           fps=len(self._fps_fenster) / 2.0)
@@ -799,6 +810,62 @@ def _leinwand_bauen(layout: Layout, steuerung: _Steuerung, schirme,
     return canvas
 
 
+def eigene_ip() -> str:
+    """Eigene Adresse ohne Netzzugriff ermitteln (für den Einrichtungs-Splash)."""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("10.255.255.255", 1))          # verbindet nicht wirklich
+        return str(sock.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+class SetupFenster(QWidget):
+    """Vollbild-Hinweis, solange das Panel im FDC nicht eingerichtet ist.
+
+    Der Viewer muss auch ohne Konfiguration laufen: der Agent meldet sich über
+    ihn (Status, OTA, Bild fürs FDC-Panel-Fenster). Ohne Hinweis sieht ein
+    frisch installierter Client wie ein kaputtes Gerät aus — deshalb „Bitte
+    Panel im FDC einrichten" in der Sprache des FDC (Default Englisch).
+    """
+
+    def __init__(self, adresse: str = "") -> None:
+        super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setStyleSheet("background:#000;")
+        self.setCursor(Qt.BlankCursor)
+        self.adresse = adresse
+        self._letzte_sprache = ""
+        # Ohne Neuzeichnen bliebe ein Wechsel der Sprache unsichtbar
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.update)
+        self._timer.start(1000)
+
+    def paintEvent(self, _ereignis) -> None:            # noqa: N802 (Qt)
+        maler = QPainter(self)
+        try:
+            maler.fillRect(self.rect(), Qt.black)
+            code = panel_lang.sprache()
+            self._letzte_sprache = code
+            splash_zeichnen(maler, QRectF(self.rect()), code, self.adresse)
+            ota = ota_stand()
+            os_zustand = os_stand()
+            text = status_popup(ota, os_zustand)
+            if text:
+                from PySide6.QtGui import QColor
+                punkt = (QColor(255, 90, 90) if "fehlgeschlagen" in text
+                         else QColor(255, 193, 7) if "Neustart" in text
+                         else QColor(61, 220, 132) if "fertig" in text
+                         or "installiert" in text else QColor(255, 193, 7))
+                ota_popup(maler, QRectF(self.rect()), text, punkt)
+        finally:
+            maler.end()
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     layout = layout_aus_argumenten(list(argv if argv is not None else sys.argv[1:]))
     app = QApplication(sys.argv[:1])
@@ -849,9 +916,15 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"von {layout.engine_host}:{layout.engine_port}", flush=True)
     leinwand = _leinwand_bauen(layout, steuerung, schirme, monitor)
     if not fenster and leinwand is None:
-        print("[viewer] nichts anzuzeigen — Layout prüfen "
-              "(keine Panels oder alle auf einem fehlenden Schirm)", flush=True)
-        return 2
+        # Frisch installiert oder noch nichts zugeordnet: Hinweis zeigen statt
+        # schwarzem Schirm — der Agent bleibt erreichbar, das FDC kann
+        # zuordnen, und danach startet der Dienst mit Bild neu.
+        splash = SetupFenster(adresse=eigene_ip())
+        if schirme:
+            splash.setGeometry(schirme[0].geometry())
+        splash.showFullScreen()
+        print("[viewer] kein Panel eingerichtet — Einrichtungs-Hinweis aktiv",
+              flush=True)
     # Sauber beenden, damit die Netz-Threads nicht hängen bleiben
     app.aboutToQuit.connect(steuerung.stop)
     return app.exec()

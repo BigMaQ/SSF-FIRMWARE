@@ -31,6 +31,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 #: Ampel-Farben. „warn" heißt: erreichbar, aber nicht betriebsbereit
 #: (z. B. Engine läuft, Sim aber nicht im Cockpit).
 GRUEN = QColor(61, 220, 132)
+HERMES_BLAU = QColor(0, 170, 255)
 GELB = QColor(255, 193, 7)
 ROT = QColor(244, 90, 80)
 GRAU = QColor(150, 160, 170)
@@ -208,7 +209,8 @@ def diag_zeichnen(maler: QPainter, flaeche, werte: dict, fps: float = 0.0,
 
 
 def unavail_zeichnen(maler: QPainter, flaeche, panel_id: str,
-                     sekunden: float = 0.0) -> None:
+                     sekunden: float = 0.0, detail: str = "",
+                     titel: str = "SYSTEMS UNAVAIL") -> None:
     """Grüne Meldung wie auf einem echten Display, wenn keine Daten kommen.
 
     Ohne Tastatur am Client ist eine schwarze Fläche Blindflug: man soll am
@@ -226,15 +228,79 @@ def unavail_zeichnen(maler: QPainter, flaeche, panel_id: str,
     schrift = QFont("DejaVu Sans", grosse, QFont.Bold)
     maler.setFont(schrift)
     titel_rect = QRectF(x0, mitte - grosse * 1.6, breite, grosse * 2.0)
-    maler.drawText(titel_rect, Qt.AlignCenter, "SYSTEMS UNAVAIL")
+    maler.drawText(titel_rect, Qt.AlignCenter, titel or "SYSTEMS UNAVAIL")
 
     maler.setPen(QColor(150, 200, 170))
     maler.setFont(QFont("DejaVu Sans", kleine))
-    detail = f"{panel_id} — keine Daten"
+    # Der Text kommt (übersetzt) von aussen; der Default bleibt deutsch.
+    text = detail or f"{panel_id} — keine Daten"
     if sekunden > 0:
-        detail += f"  ({sekunden:.0f} s)"
+        text += f"  ({sekunden:.0f} s)"
     maler.drawText(QRectF(x0, mitte + grosse * 0.5, breite, grosse * 1.6),
-                   Qt.AlignCenter, detail)
+                   Qt.AlignCenter, text)
+
+
+def splash_zeichnen(maler: QPainter, flaeche, sprache_code: str = "en",
+                    adresse: str = "") -> None:
+    """Startbild ohne Konfiguration: „Panel im FDC einrichten".
+
+    Ein frisch installierter Client hat noch keine Panel-Zuordnung — der Viewer
+    läuft (damit der Agent erreichbar ist), zeigt aber nichts an. Ohne diesen
+    Hinweis sieht das aus wie ein kaputtes Gerät. Sprache folgt dem FDC bzw.
+    dem Cache (``panel_lang``), Default Englisch.
+    """
+    try:                                     # als Paket (Tests, Agent)
+        from tools import panel_lang as pl
+    except ImportError:                      # als Skript gestartet
+        import panel_lang as pl
+    x0 = flaeche.x() if hasattr(flaeche, "x") else 0.0
+    y0 = flaeche.y() if hasattr(flaeche, "y") else 0.0
+    breite = flaeche.width()
+    hoehe = flaeche.height()
+    groesse = max(12, int(min(breite * 0.040, hoehe * 0.055)))
+
+    titel = pl.text("splash_titel", sprache_code)
+    zeilen = [pl.text("splash_text", sprache_code),
+              pl.text("splash_weg", sprache_code)]
+    if adresse:
+        zeilen.append(pl.text("splash_ip", sprache_code, ip=adresse))
+    zeilen.append(pl.text("splash_sprache", sprache_code,
+                          sprache=pl.SPRACHNAMEN.get(sprache_code, sprache_code)))
+
+    kasten = QRectF(x0 + breite * 0.08, y0 + hoehe * 0.22,
+                    breite * 0.84, hoehe * 0.52)
+    maler.setPen(Qt.NoPen)
+    maler.setBrush(QColor(0, 0, 0, 225))
+    maler.drawRoundedRect(kasten, groesse * 0.5, groesse * 0.5)
+    maler.setBrush(Qt.NoBrush)
+    maler.setPen(QPen(HERMES_BLAU, max(1, groesse // 7)))
+    maler.drawRoundedRect(kasten, groesse * 0.5, groesse * 0.5)
+
+    inner = kasten.adjusted(groesse, groesse * 0.8, -groesse, -groesse * 0.8)
+    # Schrift so lange verkleinern, bis alles in den Kasten passt
+    while groesse > 9:
+        maler.setFont(QFont("DejaVu Sans", int(groesse * 1.4), QFont.Bold))
+        breit_titel = maler.fontMetrics().horizontalAdvance(titel)
+        maler.setFont(QFont("DejaVu Sans", groesse))
+        masse = maler.fontMetrics()
+        breiteste = max([masse.horizontalAdvance(z) for z in zeilen] + [breit_titel])
+        hoehe_gesamt = groesse * 1.4 * 2.2 + len(zeilen) * groesse * 1.8
+        if breiteste <= inner.width() and hoehe_gesamt <= inner.height():
+            break
+        groesse -= 1
+
+    maler.setPen(HERMES_BLAU)
+    maler.setFont(QFont("DejaVu Sans", int(groesse * 1.4), QFont.Bold))
+    maler.drawText(QRectF(inner.x(), inner.y(), inner.width(), groesse * 2.0),
+                   Qt.AlignCenter, titel)
+    y = inner.y() + groesse * 2.4
+    for nummer, zeile in enumerate(zeilen):
+        # Adresse und Sprache sind Beiwerk, die Anweisung ist die Hauptsache
+        maler.setPen(QColor(235, 240, 245) if nummer < 2 else QColor(160, 168, 178))
+        maler.setFont(QFont("DejaVu Sans", groesse))
+        maler.drawText(QRectF(inner.x(), y, inner.width(), groesse * 1.7),
+                       Qt.AlignCenter, zeile)
+        y += groesse * 1.8
 
 
 # ---------------------------------------------------------------------------
