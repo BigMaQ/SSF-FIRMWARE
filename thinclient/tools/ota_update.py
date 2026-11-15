@@ -281,11 +281,15 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
     """Dateien laden, prüfen, austauschen.  Bei Fehler bleibt alles wie es war."""
     ergebnis = pruefen(manifest_url, ziel, timeout)
     if not ergebnis.get("verfuegbar"):
+        # Eine gescheiterte Prüfung ist KEIN „kein Update nötig": auf der Box
+        # stand danach genau das im Zustand, das FDC zeigte es an — und eine
+        # falsche Uhr (TLS scheitert) sah wie „alles aktuell" aus.
+        fehler = str(ergebnis.get("fehler") or "")
         zustand_schreiben(state_pfad, {"verfuegbar": False,
                                        "aktuell": ergebnis.get("aktuell"),
                                        "version": ergebnis.get("version"),
-                                       "meldung": "kein Update nötig",
-                                       "fehler": ergebnis.get("fehler", "")})
+                                       "meldung": "" if fehler else "kein Update nötig",
+                                       "fehler": fehler})
         return ergebnis
 
     manifest = manifest_holen(manifest_url, timeout)

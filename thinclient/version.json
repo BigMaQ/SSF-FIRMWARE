@@ -1,7 +1,7 @@
 {
-  "version": "0.12.3",
+  "version": "0.12.4",
   "datum": "2026-11-15",
-  "hinweis": "Rechte-Fix: /etc/fdc gehoert ssf (kein Permission denied beim Speichern), Unit fdc-rechte",
+  "hinweis": "OTA sagt die Wahrheit: gescheiterte Pruefung ist kein kein-Update-noetig; Rechte-Fix /etc/fdc",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "daace7d5f5a545abc99b010a98b3b2b91d5456191de5846e2a4d253cf0748220",
-      "bytes": 25422
+      "sha256": "8d8b98c84a3d07fc6156c14f07418eb10f2b5a5b4f850e46a9b8b1f7db2249fb",
+      "bytes": 25701
     },
     {
       "pfad": "tools/geraet_ident.py",
