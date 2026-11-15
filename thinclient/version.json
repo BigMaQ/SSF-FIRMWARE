@@ -1,7 +1,7 @@
 {
-  "version": "0.12.5",
+  "version": "0.12.6",
   "datum": "2026-11-15",
-  "hinweis": "NTP-Zeitquelle (timesyncd-Vorlage, --zeit), Rechte-Fix, ehrliche OTA-Meldung",
+  "hinweis": "NTP: DC 192.168.40.160 zuerst, Pools als Fallback; Rechte-Fix; ehrliche OTA-Meldung",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -100,8 +100,8 @@
     },
     {
       "pfad": "timesyncd.conf",
-      "sha256": "faa67821c2d34827a7e406e00e2348431e18396f2efd1e2abc6cd3f499864dad",
-      "bytes": 591
+      "sha256": "03064a8245219eb63e77bc1c551ceed6511c466ef55c5eb139fb361a5a6abd3a",
+      "bytes": 786
     }
   ]
 }
