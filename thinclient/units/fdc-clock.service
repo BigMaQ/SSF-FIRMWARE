@@ -1,0 +1,19 @@
+[Unit]
+Description=FDC-Anzeige-Client: Uhrzeit pruefen und notfalls stellen
+# Der Agent und OTA brauchen eine plausible Uhr: ohne sie scheitert jedes
+# TLS-Update mit "certificate is not yet valid" (leere CMOS-Batterie ohne NTP).
+After=network-online.target
+Wants=network-online.target
+Before=fdc-ident.service fdc-agent.service fdc-panel.service fdc-ota.service
+
+[Service]
+Type=oneshot
+# etwas Luft: DHCP und DNS brauchen einen Moment
+ExecStartPre=/bin/sleep 3
+ExecStart=/opt/fdc/clock-fix.sh
+RemainAfterExit=yes
+# Fehler dürfen den Start nicht blockieren — der Agent läuft auch mit falscher Uhr
+SuccessExitStatus=0 1 2
+
+[Install]
+WantedBy=multi-user.target

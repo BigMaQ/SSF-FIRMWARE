@@ -1,7 +1,7 @@
 {
-  "version": "0.12.1",
+  "version": "0.12.2",
   "datum": "2026-11-15",
-  "hinweis": "Panel-Identitaet ueber die Seriennummer (S/N auch in /geraet), keine doppelten Eintraege mehr",
+  "hinweis": "Uhrzeit-Fix (fdc-clock), Units per OTA, S/N auch in /geraet",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "e7ebc12239be0b08ac277e15e128ab8c73992a11ba2b0d8041c4a2257a50878f",
-      "bytes": 18714
+      "sha256": "d036514b1f16e60eb118d9a8c57879c2ba658135d204c2b9303271c8d30cc638",
+      "bytes": 22637
     },
     {
       "pfad": "tools/geraet_ident.py",
@@ -72,6 +72,26 @@
       "pfad": "serial-erzeugen.sh",
       "sha256": "c33681cd449778f5242b4cb53d5fb85dd3de9120c1e834188b509c0bb5af9187",
       "bytes": 2001
+    },
+    {
+      "pfad": "clock-fix.sh",
+      "sha256": "1606600121b9514c29d89c62563040359a44afb476fdcffb2ca31ec95ab0c0a1",
+      "bytes": 806
+    },
+    {
+      "pfad": "tools/clock_sync.py",
+      "sha256": "79cce6b0595c0c20eef69a8a60a1181ecf0b8106f1aeba02fca78d5855912f9f",
+      "bytes": 4786
+    },
+    {
+      "pfad": "units/fdc-clock.service",
+      "sha256": "fc5fce8cb350110b8780ddd50a8a336bf9497fcee0c23bed12bda869386b6e32",
+      "bytes": 663
+    },
+    {
+      "pfad": "units/fdc-ident.service",
+      "sha256": "7dcb10c19ccb49e1e965bbd2b40433365f2f916eb6018be357018e6b1ce67cf3",
+      "bytes": 759
     }
   ]
 }

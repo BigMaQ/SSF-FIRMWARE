@@ -40,6 +40,8 @@ STANDARD_ZIEL = "/opt/fdc"
 STANDARD_STATE = "/run/fdc-ota.json"
 STANDARD_KONFIG = "/etc/fdc/ota.json"
 STANDARD_DIENSTE = ("fdc-panel", "fdc-agent")
+#: Ziel für Units, die im Paket unter ``units/`` mitkommen (OTA läuft als root)
+UNIT_VERZEICHNIS = "/etc/systemd/system"
 MAX_DATEI_BYTES = 8 * 1024 * 1024
 #: Voreinstellung: öffentliches Repo mit den Client-Dateien.
 STANDARD_MANIFEST = ("https://gitlab.pcq-online.com/BigMaQ/fdc-thinclient/"
@@ -83,6 +85,26 @@ def lokale_version(ziel: str = STANDARD_ZIEL) -> str:
 # ---------------------------------------------------------------------------
 # Netz
 # ---------------------------------------------------------------------------
+def _zertifikat_hinweis(text: str) -> str:
+    """Aus einem TLS-Fehler eine verständliche Ursache machen.
+
+    Feldbefund 15.11.: ein Client stand 216 Tage in der Vergangenheit (leere
+    CMOS-Batterie, kein NTP). Jedes Manifest war unerreichbar, gemeldet wurde
+    nur ``[SSL: CERTIFICATE_VERIFY_FAILED] certificate is not yet valid``.
+    """
+    unten = str(text or "").lower()
+    if "not yet valid" in unten or "not valid yet" in unten:
+        return ("Uhrzeit des Clients liegt in der VERGANGENHEIT — das Zertifikat "
+                "ist aus seiner Sicht noch nicht gültig. Uhr stellen "
+                "(fdc-clock.service / clock-fix.sh), dann erneut prüfen.")
+    if "certificate has expired" in unten or "notafter" in unten:
+        return ("Uhrzeit des Clients liegt WEIT in der Zukunft — das Zertifikat "
+                "gilt als abgelaufen. Uhr stellen (fdc-clock.service).")
+    if "certificate_verify_failed" in unten or "certificate verify failed" in unten:
+        return "TLS-Zertifikat nicht vertrauenswürdig (Uhrzeit prüfen, CA-Stand)"
+    return ""
+
+
 def hole(url: str, timeout: float = 20.0) -> bytes:
     anfrage = urllib.request.Request(url, headers={"Cache-Control": "no-cache",
                                                    "User-Agent": "FDC-Client-OTA"})
@@ -95,6 +117,12 @@ def hole(url: str, timeout: float = 20.0) -> bytes:
                    401: "Anmeldung verlangt — Repo ist nicht oeffentlich",
                    403: "Zugriff verboten"}.get(exc.code, "unerwartete Antwort")
         raise ValueError(f"HTTP {exc.code} bei {url}: {hinweis}") from exc
+    except urllib.error.URLError as exc:
+        # HTTPError ist selbst ein URLError — deshalb steht dieser Zweig DANACH.
+        hinweis = _zertifikat_hinweis(f"{exc} {getattr(exc, 'reason', '')}")
+        if hinweis:
+            raise ValueError(hinweis) from exc
+        raise
 
 
 def manifest_holen(url: str, timeout: float = 20.0) -> dict:
@@ -189,7 +217,8 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
                  dienste: tuple[str, ...] = STANDARD_DIENSTE,
                  state_pfad: str = STANDARD_STATE,
                  timeout: float = 25.0,
-                 neustart: bool = True) -> dict:
+                 neustart: bool = True,
+                 unit_verzeichnis: str = UNIT_VERZEICHNIS) -> dict:
     """Dateien laden, prüfen, austauschen.  Bei Fehler bleibt alles wie es war."""
     ergebnis = pruefen(manifest_url, ziel, timeout)
     if not ergebnis.get("verfuegbar"):
@@ -250,6 +279,11 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
         Path(ziel).rename(sicherung)
     staging.rename(ziel)
 
+    # Neue/geänderte Dienste aus dem Paket übernehmen (läuft als root)
+    try:
+        units = units_installieren(ziel, unit_verzeichnis)
+    except Exception:                                   # noqa: BLE001 — nie kippen
+        units = []
     neustart_ok, meldung = True, ""
     if neustart:
         neustart_ok, meldung = dienste_neu_starten(dienste)
@@ -272,8 +306,62 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
                                    "aktuell": str(manifest["version"]),
                                    "version": str(manifest["version"]),
                                    "meldung": f"aktualisiert auf {manifest['version']}",
+                                   "units": units,
                                    "fehler": ""})
-    return {**ergebnis, "installiert": True, "aktuell": str(manifest["version"])}
+    return {**ergebnis, "installiert": True, "aktuell": str(manifest["version"]),
+            "units": units}
+
+
+def units_installieren(ziel: str = STANDARD_ZIEL,
+                       verzeichnis: str = UNIT_VERZEICHNIS) -> list[str]:
+    """Units aus dem Paket nach ``/etc/systemd/system`` bringen.
+
+    Der OTA-Lauf läuft als root — damit erreichen neue Dienste (z. B.
+    ``fdc-clock.service``) auch schon installierte Clients. Das Manifest
+    transportiert sie unter ``units/``; ohne diesen Schritt müsste man jede Box
+    anfassen, sobald ein Dienst dazukommt.
+    """
+    quelle = Path(ziel) / "units"
+    if not quelle.is_dir():
+        return []
+    zielordner = Path(verzeichnis)
+    geaendert: list[str] = []
+    for datei in sorted(quelle.glob("*.service")):
+        try:
+            text = datei.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        ziel_datei = zielordner / datei.name
+        try:
+            alt: Optional[str] = ziel_datei.read_text(encoding="utf-8")
+        except OSError:
+            alt = None
+        if alt == text:
+            continue
+        try:
+            zielordner.mkdir(parents=True, exist_ok=True)
+            ziel_datei.write_text(text, encoding="utf-8")
+            os.chmod(ziel_datei, 0o644)
+            geaendert.append(str(ziel_datei))
+        except OSError:
+            continue
+    if geaendert:
+        try:
+            subprocess.run(["systemctl", "daemon-reload"], check=False,
+                           capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        # Nur Dienste mit [Install]-Abschnitt aktivieren — reine Timer/Helfer
+        # ohne [Install] sollen nicht plötzlich beim Start laufen.
+        for pfad in geaendert:
+            name = Path(pfad).name
+            try:
+                if "[Install]" in Path(pfad).read_text(encoding="utf-8"):
+                    subprocess.run(["systemctl", "enable", name], check=False,
+                                   capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return geaendert
 
 
 def dienste_neu_starten(dienste: tuple[str, ...]) -> tuple[bool, str]:

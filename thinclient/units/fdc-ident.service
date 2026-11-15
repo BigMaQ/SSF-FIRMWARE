@@ -1,0 +1,18 @@
+[Unit]
+# Seriennummer des Geräts einmalig ermitteln (Dell-Service-Tag aus dem SMBIOS).
+# Nötig, weil /sys/class/dmi/id/product_serial nur für root lesbar ist und der
+# Agent als "ssf" läuft. Das Skript ist idempotent, ein zweiter Start schadet
+# nicht — deshalb keine Condition, damit man es von Hand wiederholen kann.
+Description=FDC Seriennummer des Geraets ermitteln
+After=local-fs.target
+Before=fdc-agent.service fdc-panel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/fdc/serial-erzeugen.sh /etc/fdc/serial
+# Der Agent darf die Datei lesen — nicht mehr und nicht weniger
+ExecStartPost=/bin/sh -c 'mkdir -p /etc/fdc && chmod 755 /etc/fdc && chmod 644 /etc/fdc/serial 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
