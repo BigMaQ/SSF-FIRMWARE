@@ -42,6 +42,65 @@ STANDARD_KONFIG = "/etc/fdc/ota.json"
 STANDARD_DIENSTE = ("fdc-panel", "fdc-agent")
 #: Ziel für Units, die im Paket unter ``units/`` mitkommen (OTA läuft als root)
 UNIT_VERZEICHNIS = "/etc/systemd/system"
+#: Hier liegen Layout, Gerät, Power und Auto-Update-Regeln. Der Agent läuft als
+#: ``ssf``, der Installer legt die Dateien aber als root an — dann scheitert
+#: jedes Speichern mit „Permission denied".
+ETC_VERZEICHNIS = "/etc/fdc"
+BESITZER = ("ssf", "ssf")
+
+
+def rechte_reparieren(etc: str = ETC_VERZEICHNIS,
+                      besitzer: tuple[str, str] = BESITZER) -> list[str]:
+    """``/etc/fdc`` samt JSON-Dateien dem Agent-Benutzer geben (idempotent).
+
+    Grund: ``install-offline.sh`` schreibt ``panels.json``/``power.json``/
+    ``auto.json``/``ota.json`` als root mit 644. Der Agent und der Viewer laufen
+    als ``ssf`` — ein ``PUT /config`` endet dann in
+    ``PermissionError: [Errno 13] Permission denied: '/etc/fdc/panels.json.tmp'``.
+    Läuft als root (OTA-Installation, Firstboot) und meldet, was es geändert hat.
+
+    ``agent.token`` bleibt unangetastet (root:ssf 640 — der Agent braucht nur
+    Lesen, das Geheimnis soll nicht dem Dienst-Benutzer gehören).
+    """
+    import grp
+    import pwd
+
+    try:
+        uid = pwd.getpwnam(besitzer[0]).pw_uid
+        gid = grp.getgrnam(besitzer[1]).gr_gid
+    except KeyError:
+        return []                                   # Benutzer fehlt: nichts tun
+    geaendert: list[str] = []
+    if not os.path.isdir(etc):
+        return geaendert
+
+    def _besitzer_setzen(pfad: str) -> None:
+        try:
+            st = os.stat(pfad)
+        except OSError:
+            return
+        if (st.st_uid, st.st_gid) == (uid, gid):
+            return
+        try:
+            os.chown(pfad, uid, gid)
+            geaendert.append(pfad)
+        except OSError:
+            pass                                    # ohne root: still weiter
+
+    _besitzer_setzen(etc)
+    for name in sorted(os.listdir(etc)):
+        pfad = os.path.join(etc, name)
+        if not name.endswith(".json") or not os.path.isfile(pfad):
+            continue
+        _besitzer_setzen(pfad)
+        try:
+            st = os.stat(pfad)
+            if not st.st_mode & 0o200:              # Schreibrecht für den Besitzer
+                os.chmod(pfad, 0o644)
+                geaendert.append(pfad + " (chmod 644)")
+        except OSError:
+            pass
+    return geaendert
 MAX_DATEI_BYTES = 8 * 1024 * 1024
 #: Voreinstellung: öffentliches Repo mit den Client-Dateien.
 STANDARD_MANIFEST = ("https://gitlab.pcq-online.com/BigMaQ/fdc-thinclient/"
@@ -301,15 +360,19 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
             return {**ergebnis, "installiert": False, "zurueckgerollt": True,
                     "fehler": meldung[:250]}
 
+    # Rechte in /etc/fdc nachziehen: der Installer legte die JSON-Dateien als
+    # root an, gespeichert wird aber als ssf (sonst „Permission denied").
+    rechte = rechte_reparieren()
     zustand_schreiben(state_pfad, {"stand": time.time(),
                                    "verfuegbar": False,
                                    "aktuell": str(manifest["version"]),
                                    "version": str(manifest["version"]),
                                    "meldung": f"aktualisiert auf {manifest['version']}",
                                    "units": units,
+                                   "rechte": rechte,
                                    "fehler": ""})
     return {**ergebnis, "installiert": True, "aktuell": str(manifest["version"]),
-            "units": units}
+            "units": units, "rechte": rechte}
 
 
 def units_installieren(ziel: str = STANDARD_ZIEL,
@@ -477,7 +540,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                           help="nur prüfen, Zustand schreiben, beenden")
     zerleger.add_argument("--installieren", action="store_true",
                           help="sofort installieren")
+    zerleger.add_argument("--rechte", action="store_true",
+                          help="nur Schreibrechte in /etc/fdc reparieren (als root)")
     args = zerleger.parse_args(argv)
+
+    if args.rechte:
+        geaendert = rechte_reparieren()
+        print(json.dumps({"ok": True, "geaendert": geaendert}, ensure_ascii=False))
+        return 0
 
     if args.installieren:
         try:

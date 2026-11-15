@@ -1,0 +1,19 @@
+[Unit]
+# Schreibrechte in /etc/fdc herstellen: der ISO-Installer legt panels.json,
+# power.json, auto.json und ota.json als root mit 644 an, gespeichert wird aber
+# als Benutzer "ssf" (Agent und Viewer) — sonst endet jedes PUT /config in
+# "PermissionError: [Errno 13] Permission denied: /etc/fdc/panels.json.tmp".
+# Idempotent und billig: läuft bei jedem Start, ändert nur wenn nötig.
+Description=FDC Schreibrechte in /etc/fdc herstellen
+After=local-fs.target
+Before=fdc-agent.service fdc-panel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/fdc/tools/ota_update.py --rechte
+# Fehlt das Werkzeug (alte Installation), ist das kein Startfehler.
+SuccessExitStatus=0 1 2
+
+[Install]
+WantedBy=multi-user.target

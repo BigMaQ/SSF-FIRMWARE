@@ -137,12 +137,29 @@ def pruefen(schreiben: bool = False, state: Path | str | None = None,
             laufen=_laufen) -> dict:
     """Nachsehen, ob Updates anstehen (ohne zu installieren)."""
     # Der Index muss aktuell sein, sonst meldet apt veraltete Pakete.
-    _laufen(["apt-get", "update", "-qq"], timeout=300)
+    # Den Rückgabewert NICHT verwerfen: bei falscher Uhrzeit (oder gesperrter
+    # Paketquelle) scheitert `apt-get update` und `apt list` sagt trotzdem
+    # „0 Pakete". Genau so sah ein Client mit 216 Tagen Zeitversatz „alles gut"
+    # aus, während gar kein Index da war.
+    up_code, up_ausgabe = laufen(["apt-get", "update", "-qq"], timeout=300)
     code, ausgabe = laufen(["apt", "list", "--upgradable"], timeout=180)
     pakete = pakete_parsen(ausgabe)
+    hinweis = ""
+    if up_code != 0:
+        text = str(up_ausgabe or "")
+        unten = text.lower()
+        if any(wort in unten for wort in ("not valid yet", "valid-until", "release file",
+                                          "expired", "is not valid")):
+            hinweis = ("Paketindex abgelehnt — typische Ursache ist eine falsche "
+                       "Uhrzeit auf dem Client (fdc-clock.service / clock-fix.sh)")
+        else:
+            letzte = [z for z in text.strip().splitlines() if z.strip()]
+            hinweis = ("apt-get update fehlgeschlagen: "
+                       + (letzte[-1][:160] if letzte else "unbekannt"))
     daten = {
         "stand": time.time(),
-        "ok": code == 0,
+        "ok": code == 0 and up_code == 0,
+        "hinweis": hinweis,
         "anzahl": len(pakete),
         "pakete": pakete[:40],
         "reboot_noetig": REBOOT_NÖTIG.exists(),

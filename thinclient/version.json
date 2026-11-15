@@ -1,7 +1,7 @@
 {
-  "version": "0.12.2",
+  "version": "0.12.3",
   "datum": "2026-11-15",
-  "hinweis": "Uhrzeit-Fix (fdc-clock), Units per OTA, S/N auch in /geraet",
+  "hinweis": "Rechte-Fix: /etc/fdc gehoert ssf (kein Permission denied beim Speichern), Unit fdc-rechte",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "d036514b1f16e60eb118d9a8c57879c2ba658135d204c2b9303271c8d30cc638",
-      "bytes": 22637
+      "sha256": "daace7d5f5a545abc99b010a98b3b2b91d5456191de5846e2a4d253cf0748220",
+      "bytes": 25422
     },
     {
       "pfad": "tools/geraet_ident.py",
@@ -55,8 +55,8 @@
     },
     {
       "pfad": "tools/os_update.py",
-      "sha256": "62d9885e0c6a3bfaeb221f705fe2da488383484340d606950cf5c0a95c39d25c",
-      "bytes": 9095
+      "sha256": "179cfad257031cbe6980a6b84fc926b9c0dd85c06811de0dfe2874a120f10ac1",
+      "bytes": 10092
     },
     {
       "pfad": "tools/panel_lang.py",
@@ -92,6 +92,11 @@
       "pfad": "units/fdc-ident.service",
       "sha256": "7dcb10c19ccb49e1e965bbd2b40433365f2f916eb6018be357018e6b1ce67cf3",
       "bytes": 759
+    },
+    {
+      "pfad": "units/fdc-rechte.service",
+      "sha256": "568869885b8439f25e5ba2c85df4a8e0e690ffa68ffe6b224a827c6da8093dac",
+      "bytes": 748
     }
   ]
 }
