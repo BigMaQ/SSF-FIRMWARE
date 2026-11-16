@@ -338,10 +338,17 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
         # stand danach genau das im Zustand, das FDC zeigte es an — und eine
         # falsche Uhr (TLS scheitert) sah wie „alles aktuell" aus.
         fehler = str(ergebnis.get("fehler") or "")
+        # Auch wenn nichts zu installieren ist: Umgebung in Ordnung bringen.
+        # Ein OTA-Start ist der einzige Weg, auf dem ein Client als root
+        # aufräumen darf — Rechte in /etc/fdc und NTP gehören dazu.
+        rechte = rechte_reparieren()
+        zeit = zeit_einrichten(ziel)
         zustand_schreiben(state_pfad, {"verfuegbar": False,
                                        "aktuell": ergebnis.get("aktuell"),
                                        "version": ergebnis.get("version"),
                                        "meldung": "" if fehler else "kein Update nötig",
+                                       "rechte": rechte,
+                                       "zeit": zeit,
                                        "fehler": fehler})
         return ergebnis
 

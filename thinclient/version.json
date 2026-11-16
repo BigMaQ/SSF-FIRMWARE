@@ -1,7 +1,7 @@
 {
-  "version": "0.12.8",
-  "datum": "2026-11-15",
-  "hinweis": "Image bleibt neutral: keine eigenen IPs (NTP-Pools, Engine leer bis das FDC zuweist)",
+  "version": "0.12.9",
+  "datum": "2026-11-16",
+  "hinweis": "OTA-Start repariert die Umgebung auch ohne neue Version (Rechte /etc/fdc, NTP)",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "3a32b5a05362971359586a141e03aa2b377937edf746cb16e8e9ff971de72ae8",
-      "bytes": 28375
+      "sha256": "29372c804390d3fbec322cbe51d58a8cc4dfb874d2106a6271efb48b4fe47ee6",
+      "bytes": 28781
     },
     {
       "pfad": "tools/geraet_ident.py",
