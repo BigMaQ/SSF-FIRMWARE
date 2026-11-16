@@ -1,7 +1,7 @@
 {
-  "version": "0.12.11",
-  "datum": "2026-11-16",
-  "hinweis": "Installer: 30 s auf den Kabel-Link warten (kein WLAN-Dialog bei Spanning Tree), erster Start holt SSH/Sudo nach",
+  "version": "0.12.12",
+  "datum": "2026-11-17",
+  "hinweis": "python3-websocket mit installieren (sonst bleibt der Stream schwarz), WLAN-Waechter laeuft dauerhaft",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
