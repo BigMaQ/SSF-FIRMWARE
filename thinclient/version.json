@@ -1,7 +1,7 @@
 {
-  "version": "0.12.9",
+  "version": "0.12.10",
   "datum": "2026-11-16",
-  "hinweis": "OTA-Start repariert die Umgebung auch ohne neue Version (Rechte /etc/fdc, NTP)",
+  "hinweis": "Einrichtungs-AP ist offen (kein WPA-Zwang, kein Passwort zu lang oder zu kurz); Passphrase nur per FDC_SETUP_PSK",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -35,8 +35,8 @@
     },
     {
       "pfad": "tools/wlan_setup.py",
-      "sha256": "68f356b4c6d47a33602b2929e2ab139b3584b078e29dee506a45b9778b669c74",
-      "bytes": 23623
+      "sha256": "222daac7d8c29d3e5af6012d63c692b50b32290654b0b1e562b53149892756d0",
+      "bytes": 24170
     },
     {
       "pfad": "tools/ota_update.py",

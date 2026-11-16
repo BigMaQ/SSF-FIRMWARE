@@ -196,20 +196,33 @@ def _hostname() -> str:
         return "client"
 
 
-def ap_starten(ssid: Optional[str] = None, passwort: str = "thinclient") -> tuple[bool, str]:
-    """Einrichtungs-AP hochziehen (NetworkManager, DHCP/DNS inklusive)."""
+def ap_starten(ssid: Optional[str] = None, passwort: Optional[str] = None) -> tuple[bool, str]:
+    """Einrichtungs-AP hochziehen (NetworkManager, DHCP/DNS inklusive).
+
+    Ohne Passphrase läuft der AP **offen**: das Einrichten lebt nur, solange
+    kein LAN da ist, und Handys quittieren Sonderfälle gern mit „Passwort zu
+    lang oder zu kurz" statt zu verbinden.  Ein Passwort nur, wenn ausdrücklich
+    eines gesetzt ist (Parameter oder ``FDC_SETUP_PSK``).
+    """
     karte = wlan_karte()
     if not karte:
         return False, "keine WLAN-Karte gefunden"
     ssid = ssid or ap_ssid()
+    psk = (passwort if passwort is not None
+           else os.environ.get("FDC_SETUP_PSK", "")).strip()
     nmcli("connection", "delete", AP_NAME, timeout=12)      # Reste aufräumen
-    rc, aus = nmcli(
+    argumente = [
         "connection", "add", "type", "wifi", "ifname", karte, "con-name", AP_NAME,
         "autoconnect", "no", "ssid", ssid, "802-11-wireless.mode", "ap",
         "802-11-wireless.band", "bg", "802-11-wireless.powersave", "2",
-        "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", passwort,
-        "ipv4.method", "shared", "ipv4.addresses", AP_ADRESSE,
-        "ipv6.method", "ignore", timeout=25)
+    ]
+    if psk:
+        argumente += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
+    else:
+        argumente += ["wifi-sec.key-mgmt", "none"]
+    argumente += ["ipv4.method", "shared", "ipv4.addresses", AP_ADRESSE,
+                  "ipv6.method", "ignore"]
+    rc, aus = nmcli(*argumente, timeout=25)
     if rc != 0:
         return False, f"AP anlegen fehlgeschlagen: {aus[:300]}"
     rc, aus = nmcli("-w", "30", "connection", "up", AP_NAME, timeout=45)
