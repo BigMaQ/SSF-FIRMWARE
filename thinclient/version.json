@@ -1,7 +1,7 @@
 {
-  "version": "0.12.10",
+  "version": "0.12.11",
   "datum": "2026-11-16",
-  "hinweis": "Einrichtungs-AP ist offen (kein WPA-Zwang, kein Passwort zu lang oder zu kurz); Passphrase nur per FDC_SETUP_PSK",
+  "hinweis": "Installer: 30 s auf den Kabel-Link warten (kein WLAN-Dialog bei Spanning Tree), erster Start holt SSH/Sudo nach",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
