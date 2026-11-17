@@ -1,7 +1,7 @@
 {
-  "version": "0.12.12",
+  "version": "0.12.13",
   "datum": "2026-11-17",
-  "hinweis": "python3-websocket mit installieren (sonst bleibt der Stream schwarz), WLAN-Waechter laeuft dauerhaft",
+  "hinweis": "SYSTEMS UNAVAIL blankt das Panel (kein Standbild mehr), Absturzspur fuer Python-Ausnahmen, Klick auf Herunterfahren kann die GUI nicht mehr mitnehmen",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "f49dc00d5980f02a028f335368e3ed21547b9c22e22f38fada5b86c19e21a837",
-      "bytes": 44131
+      "sha256": "2da9e1db6c176a4c3898ab636a61b3c44daca572053519b5121d2c1797bb749c",
+      "bytes": 44475
     },
     {
       "pfad": "tools/panel_agent.py",
@@ -25,8 +25,8 @@
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "64abcf2a2c3fcda80324c3b0f44b5890fd8d68281266ef0bcc0d4c5e2a16506d",
-      "bytes": 22654
+      "sha256": "ca6d714061e7afe5817040e6d44955474d0e00b08b04a7ab20a31175a8a0f261",
+      "bytes": 23116
     },
     {
       "pfad": "tools/panel_grab.py",

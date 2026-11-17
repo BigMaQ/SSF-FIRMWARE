@@ -220,6 +220,12 @@ def unavail_zeichnen(maler: QPainter, flaeche, panel_id: str,
     y0 = flaeche.y() if hasattr(flaeche, "y") else 0.0
     breite = flaeche.width()
     hoehe = flaeche.height()
+    # Erst leeren.  Sonst schreibt sich „SYSTEMS UNAVAIL" über die alten
+    # Instrumente (real passiert, nachdem GlassOut wegbricht): ein Standbild mit
+    # grünem Text darüber sieht aus wie ein halb funktionierendes Panel.  Ein
+    # blankes Feld ist die ehrliche Aussage.  Nur die eigene Fläche — bei zwei
+    # Panels auf einem Schirm darf das andere Panel nicht mit verschwinden.
+    maler.fillRect(QRectF(x0, y0, breite, hoehe), QColor(0, 0, 0))
     grosse = max(13, int(min(breite, hoehe) * 0.055))
     kleine = max(9, int(grosse * 0.55))
     mitte = y0 + hoehe / 2.0

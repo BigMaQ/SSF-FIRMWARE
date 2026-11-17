@@ -189,14 +189,18 @@ class PanelFenster(QWidget):
 
     def _zeichnen(self, maler: QPainter) -> None:
         maler.fillRect(self.rect(), Qt.black)
-        if self._pixmap is not None and not self._pixmap.isNull():
+        meldung = self._wartemeldung() if not self._testbetrieb else ""
+        hinweis = setup_hinweis() if not self._testbetrieb else {}
+        # Kommt eine Meldung, wird das letzte Bild NICHT mehr gezeichnet: sonst
+        # steht ein Standbild der Instrumente unter „SYSTEMS UNAVAIL" und das
+        # Panel sieht halb funktionsfähig aus (real so gesehen, nachdem
+        # GlassOut wegbricht).  Ein blankes Feld mit Meldung ist die Wahrheit.
+        if not meldung and not hinweis and self._pixmap is not None and not self._pixmap.isNull():
             maler.setRenderHint(QPainter.SmoothPixmapTransform, True)
             x, y, w, h = self.zielrechteck()
             # Überstand (cover/zoom) wird vom Fenster beschnitten - genau das
             # braucht man, wenn das Bild in einen MIP-Ausschnitt passen soll.
             maler.drawPixmap(QRectF(x, y, w, h), self._pixmap, QRectF(self._pixmap.rect()))
-        meldung = self._wartemeldung() if not self._testbetrieb else ""
-        hinweis = setup_hinweis() if not self._testbetrieb else {}
         if hinweis:
             # Kein Netz: der Client wartet auf die WLAN-Einrichtung über das
             # Handy — die Anleitung ist wichtiger als „SYSTEMS UNAVAIL".
