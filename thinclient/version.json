@@ -1,7 +1,7 @@
 {
-  "version": "0.12.28",
+  "version": "0.12.29",
   "datum": "2026-11-18",
-  "hinweis": "Client lernt die FDC-Adresse auch aus jeder Anfrage mit gueltigem Token (nicht nur aus dem Beacon) und merkt sich bis zu vier Adressen - damit registriert er sich nach dem ersten Anklopfen selbst, auch ueber VLAN-Grenzen und nach DHCP-Wechsel",
+  "hinweis": "OTA haertet sich: Sperre gegen zwei gleichzeitige Installationen (die zerlegten sich bisher gegenseitig das Staging - danach fehlten panel_agent.py und panel_viewer.py, der Agent startete nicht mehr, der Status sagte trotzdem aktualisiert), und Vollstaendigkeitspruefung nach dem Austausch mit Rollback",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "b197431c1c02aa2126d6ecb3aa83674ec487fa664a3ccc5c676854176fd5e7db",
-      "bytes": 31578
+      "sha256": "1886f9fb0cebf93400b4b4e0ac0b46f06d96b6cb34ff77ce72cd40f7ba9d7adb",
+      "bytes": 36476
     },
     {
       "pfad": "tools/geraet_ident.py",

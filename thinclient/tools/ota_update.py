@@ -19,6 +19,7 @@ der Agent (Anzeige im FDC) und der Viewer (Popup) mit.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -155,6 +156,9 @@ def rechte_reparieren(etc: str = ETC_VERZEICHNIS,
             pass
     return geaendert
 MAX_DATEI_BYTES = 8 * 1024 * 1024
+#: Sperrdatei gegen zwei gleichzeitige Installationen (Ausweichorte siehe
+#: ``_sperre_holen``). Aenderbar, damit Tests nicht nach /run schreiben.
+SPERR_DATEI = "/run/fdc-ota.lock"
 #: Voreinstellung: öffentliches Repo mit den Client-Dateien.
 STANDARD_MANIFEST = ("https://gitlab.pcq-online.com/BigMaQ/fdc-thinclient/"
                      "-/raw/main/version.json")
@@ -403,6 +407,100 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
 
     manifest = manifest_holen(manifest_url, timeout)
     basis = str(manifest.get("basis") or konfiguration_lesen().get("dateien_basis") or "")
+    # Nur EINE Installation gleichzeitig. Zwei Laeufe teilen sich ``<ziel>.new``
+    # und loeschen sich gegenseitig die halb geschriebenen Dateien weg — real
+    # passiert (18.11.): OTA per POST /update und von Hand gestartet, danach
+    # fehlten panel_agent.py und panel_viewer.py, der Status sagte trotzdem
+    # „aktualisiert".
+    sperre = _sperre_holen(ziel)
+    if sperre is None:
+        zustand_schreiben(state_pfad, {"verfuegbar": True,
+                                       "aktuell": lokale_version(ziel),
+                                       "version": str(manifest.get("version")),
+                                       "meldung": "Installation laeuft bereits",
+                                       "fehler": "eine andere Installation haelt die Sperre"})
+        return {"verfuegbar": True, "aktuell": lokale_version(ziel),
+                "version": str(manifest.get("version")),
+                "meldung": "Installation laeuft bereits — nicht doppelt gestartet"}
+    try:
+        return _installieren_gesperrt(manifest, manifest_url, basis, ziel,
+                                      state_pfad=state_pfad, timeout=timeout,
+                                      neustart=neustart, dienste=dienste,
+                                      unit_verzeichnis=unit_verzeichnis)
+    finally:
+        _sperre_freigeben(sperre)
+
+
+def fehlende_dateien(ziel: str, manifest: dict) -> list:
+    """Welche Dateien aus dem Manifest fehlen in der Installation?
+
+    Getrennt und fuer sich pruefbar — an dieser Liste haengt die Entscheidung,
+    ob eine Installation als gelungen gilt oder zurueckgerollt wird.
+    """
+    fehlen = []
+    for eintrag in manifest.get("dateien") or []:
+        pfad = str((eintrag or {}).get("pfad") or "").strip()
+        if pfad and not (Path(ziel) / pfad).is_file():
+            fehlen.append(pfad)
+    return fehlen
+
+
+class _OhneSperre:
+    """Platzhalter, wenn nirgends eine Sperrdatei angelegt werden kann.
+
+    Dann laeuft das Update weiter — ein nicht moegliches Update waere schlimmer
+    als ein theoretisch doppeltes.
+    """
+
+    def close(self) -> None:
+        return None
+
+
+def _sperre_holen(ziel: str):
+    """Exklusive Sperre fuer die Installation.
+
+    ``None`` = eine andere Installation laeuft schon. ``/run`` ist nur fuer root
+    schreibbar, deshalb eine Kette: erster Ort, der sich oeffnen laesst, gewinnt.
+    """
+    kandidaten = [SPERR_DATEI, "/var/lock/fdc-ota.lock",
+                  str(Path(str(ziel) + ".new").parent / ".fdc-ota.lock")]
+    for pfad in kandidaten:
+        try:
+            Path(pfad).parent.mkdir(parents=True, exist_ok=True)
+            griff = open(pfad, "w")                               # noqa: SIM115
+        except OSError:
+            continue
+        try:
+            fcntl.flock(griff, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            griff.close()
+            return None                     # jemand anderes haelt die Sperre
+        try:
+            griff.write(str(os.getpid()))
+            griff.flush()
+        except OSError:
+            pass
+        return griff
+    return _OhneSperre()
+
+
+def _sperre_freigeben(griff) -> None:
+    try:
+        fcntl.flock(griff, fcntl.LOCK_UN)
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        griff.close()
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _installieren_gesperrt(manifest: dict, manifest_url: str, basis: str, ziel: str,
+                           state_pfad: str, timeout: float,
+                           neustart: bool, dienste, unit_verzeichnis) -> dict:
+    ergebnis = {"ziel": str(ziel), "verfuegbar": True,
+                "aktuell": lokale_version(ziel),
+                "version": str(manifest.get("version"))}
     staging = Path(str(ziel) + ".new")
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
@@ -450,6 +548,24 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
     if Path(ziel).exists():
         Path(ziel).rename(sicherung)
     staging.rename(ziel)
+
+    # Vollstaendigkeit pruefen, BEVOR die Installation als gelungen gilt:
+    # ein Ordner ohne panel_agent.py sieht im Status wie ein erfolgreiches
+    # Update aus, der Agent startet aber nicht (real passiert 18.11.).
+    fehlend = fehlende_dateien(ziel, manifest)
+    if fehlend:
+        shutil.rmtree(ziel, ignore_errors=True)
+        if sicherung.exists():
+            sicherung.rename(ziel)
+        dienste_neu_starten(dienste)
+        zustand_schreiben(state_pfad, {
+            "verfuegbar": True, "aktuell": lokale_version(ziel),
+            "version": str(manifest.get("version")),
+            "meldung": "Installation unvollstaendig — alte Version wiederhergestellt",
+            "fehler": "fehlende Dateien: " + ", ".join(fehlend)[:180]})
+        return {"verfuegbar": True, "aktuell": lokale_version(ziel),
+                "version": str(manifest.get("version")),
+                "meldung": "Installation unvollstaendig", "fehlend": fehlend}
 
     # Neue/geänderte Dienste aus dem Paket übernehmen (läuft als root)
     try:
