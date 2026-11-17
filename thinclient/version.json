@@ -1,7 +1,7 @@
 {
-  "version": "0.12.25",
+  "version": "0.12.26",
   "datum": "2026-11-18",
-  "hinweis": "Einrichtung: Portal-DNS (Handy oeffnet die Seite selbst), Verbinden gilt erst mit IPv4 als Erfolg, bei Fehlschlag kommt der AP sofort zurueck, Setup-Hinweis verdeckt im Canvas das alte Bild",
+  "hinweis": "Einrichtungs-AP bleibt stehen (die eigene AP-Adresse 192.168.4.1 galt als WLAN-Verbindung, der AP schaltete sich nach 30 s selbst ab), Verbindungsfehler landen im Journal und auf dem Panel, Portal-DNS fuer automatisches Oeffnen der Seite",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -35,8 +35,8 @@
     },
     {
       "pfad": "tools/wlan_setup.py",
-      "sha256": "0237e91023984d58797d3c3a39cab0d35cc8d1bff37aeb7df54bf298cdf2a3a2",
-      "bytes": 30393
+      "sha256": "3e5027c5832009c7a80f5ccc0c85c868c478af6b3180393d03f5971c63d12ecd",
+      "bytes": 32378
     },
     {
       "pfad": "tools/ota_update.py",

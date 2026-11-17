@@ -130,17 +130,37 @@ def _hat_ipv4(geraet: str) -> bool:
     return b"inet " in (ergebnis.stdout or b"")
 
 
+def _hat_standardroute(geraet: str) -> bool:
+    """Führt die Standardroute über dieses Gerät? Nur dann ist es ein Uplink.
+
+    ``_hat_ipv4`` allein reicht NICHT: im AP-Modus hat die WLAN-Karte die eigene
+    Adresse 192.168.4.1. Damit hielt sich der Client für „verbunden", der Wächter
+    schaltete den Einrichtungs-AP ab — der Hotspot verschwand nach spätestens
+    30 s von selbst (Feldbefund 18.11., 192.168.20.65).
+    """
+    try:
+        lauf = subprocess.run(["ip", "-4", "route", "show", "default", "dev", geraet],
+                              capture_output=True, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool((lauf.stdout or b"").strip())
+
+
 def wlan_verbunden(karte: Optional[str] = None) -> bool:
     karte = karte or wlan_karte()
     if not karte:
         return False
+    if ap_laeuft():                      # wir sind der Hotspot, nicht der Client
+        return False
+    if not _hat_standardroute(karte):
+        return False
     rc, aus = nmcli("-t", "-f", "DEVICE,STATE", "device", "status")
     if rc != 0:
-        return _hat_ipv4(karte)
+        return True                      # Route steht; nmcli-Abfrage ist Beiwerk
     for zeile in terse_felder(aus):
-        if len(zeile) >= 2 and zeile[0] == karte and zeile[1] == "connected":
-            return _hat_ipv4(karte)
-    return _hat_ipv4(karte)
+        if len(zeile) >= 2 and zeile[0] == karte:
+            return zeile[1] == "connected"
+    return True
 
 
 def gespeicherte_wlan_profile() -> list[str]:
@@ -319,13 +339,24 @@ def verbinden_und_zurueck(ssid: str, passwort: str,
     erreicht: kein LAN, kein WLAN, kein Hotspot.
     """
     ok, meldung = verbinden(ssid, passwort, karte)
-    if not ok:
-        wieder, ap_meldung = ap_starten()
-        if wieder:
-            meldung = f"{meldung} — Einrichtungs-AP ist wieder da ({ap_meldung})"
-        else:
-            meldung = f"{meldung} — AP-Neustart fehlgeschlagen: {ap_meldung}"
-    return ok, meldung
+    if ok:
+        return True, meldung
+    print(f"[wlan-setup] Verbinden mit \"{ssid}\" fehlgeschlagen: {meldung}",
+          file=sys.stderr, flush=True)
+    wieder, ap_meldung = ap_starten()
+    if wieder:
+        meldung = f"{meldung} — Einrichtungs-AP ist wieder da ({ap_meldung})"
+    else:
+        meldung = f"{meldung} — AP-Neustart fehlgeschlagen: {ap_meldung}"
+    # Auf dem Panel sichtbar machen: gleicher Weg wie beim AP-Fehler.
+    try:
+        zustand = zustand_lesen()
+        zustand.update({"aktiv": True, "stand": "setup", "fehler": meldung,
+                        "ssid": ap_ssid(), "url": f"http://{AP_IP}"})
+        zustand_schreiben(STANDARD_STATE, zustand)
+    except Exception:                       # noqa: BLE001 - Anzeige ist Beiwerk
+        pass
+    return False, meldung
 
 
 def verbinden(ssid: str, passwort: str, karte: Optional[str] = None) -> tuple[bool, str]:
@@ -570,7 +601,16 @@ def baue_handler(state_pfad: str, ssid: str,
             except ValueError:
                 self._json({"ok": False, "meldung": "Anfrage nicht lesbar"}, 400)
                 return
-            ok, meldung = verbinder(str(daten.get("ssid") or ""), str(daten.get("pass") or ""))
+            gewaehlt = str(daten.get("ssid") or "")
+            # Ohne diese Zeile ist ein gescheiterter Verbindungsversuch spaeter
+            # nicht nachvollziehbar: der nmcli-Text ging nur an das Handy, und
+            # das ist nach dem AP-Abbau weg. Passwort wird NIE geloggt.
+            print(f"[wlan-setup] Verbindungsversuch zu \"{gewaehlt}\"", file=sys.stderr,
+                  flush=True)
+            ok, meldung = verbinder(gewaehlt, str(daten.get("pass") or ""))
+            print(f"[wlan-setup] Ergebnis für \"{gewaehlt}\": "
+                  f"{'ok' if ok else 'gescheitert'} — {meldung}", file=sys.stderr,
+                  flush=True)
             if ok:
                 zustand_schreiben(state_pfad, {"aktiv": False, "stand": "wlan",
                                                "ssid": daten.get("ssid"), "url": ""})
