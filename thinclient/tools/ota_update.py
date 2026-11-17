@@ -325,6 +325,51 @@ def pruefen(manifest_url: str, ziel: str = STANDARD_ZIEL,
     return ergebnis
 
 
+#: apt-Pakete, ohne die der Viewer kein Bild bekommt.  ``python3-websocket``
+#: fehlte auf jeder Box, die vor dem Preseed-Fix installiert wurde — Symptom:
+#: schwarzes Panel, im Journal „[stream] websocket-client fehlt".  Das OTA kann
+#: Programmdateien tauschen, aber keine Debian-Pakete — deshalb zieht es sie hier
+#: selbst nach (läuft als root in der Installations-Unit).
+MODUL_PAKETE = (("websocket", "python3-websocket"),)
+
+
+def module_installieren(pakete: tuple[tuple[str, str], ...] = MODUL_PAKETE,
+                        laufen=None) -> list[str]:
+    """Fehlende Python-Module per apt nachziehen (idempotent, root nötig).
+
+    Rückgabe: Liste der Pakete, die nachinstalliert wurden.  Schlägt apt fehl
+    (kein Netz, kein root), bleibt es bei ``[]`` — der OTA-Lauf darf daran nicht
+    scheitern, der Befund steht dann im Journal und in der Selbstauskunft.
+    """
+    import importlib.util
+    import subprocess
+
+    laufen = laufen or (lambda befehl, **kw: subprocess.run(
+        befehl, capture_output=True, text=True, timeout=kw.get("timeout", 240)))
+    nachinstalliert: list[str] = []
+    for modul, paket in pakete:
+        try:
+            if importlib.util.find_spec(modul) is not None:
+                continue
+        except (ImportError, ValueError):
+            continue
+        try:
+            lauf = laufen(["apt-get", "install", "-y", "-q",
+                           "-o", "Dpkg::Options::=--force-confdef",
+                           "-o", "Dpkg::Options::=--force-confold", paket],
+                          timeout=240)
+            ok = int(getattr(lauf, "returncode", 1)) == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if ok:
+            importlib.invalidate_caches()
+            nachinstalliert.append(paket)
+        print(f"[ota] Modul {modul}: "
+              f"{'nachinstalliert (' + paket + ')' if ok else 'fehlt weiterhin'}",
+              flush=True)
+    return nachinstalliert
+
+
 def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
                  dienste: tuple[str, ...] = STANDARD_DIENSTE,
                  state_pfad: str = STANDARD_STATE,
@@ -343,12 +388,16 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
         # aufräumen darf — Rechte in /etc/fdc und NTP gehören dazu.
         rechte = rechte_reparieren()
         zeit = zeit_einrichten(ziel)
+        # Fehlende Python-Module auch hier nachziehen: „kein Update nötig" ist der
+        # Normalfall, und ein OTA-Start ist der einzige root-Weg auf der Box.
+        module = module_installieren()
         zustand_schreiben(state_pfad, {"verfuegbar": False,
                                        "aktuell": ergebnis.get("aktuell"),
                                        "version": ergebnis.get("version"),
                                        "meldung": "" if fehler else "kein Update nötig",
                                        "rechte": rechte,
                                        "zeit": zeit,
+                                       "module": module,
                                        "fehler": fehler})
         return ergebnis
 
@@ -429,6 +478,9 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
     rechte = rechte_reparieren()
     # NTP einrichten (leere CMOS-Batterie ⇒ Box startet in der Vergangenheit)
     zeit = zeit_einrichten(ziel)
+    # Fehlende Python-Module nachziehen (z. B. python3-websocket): ohne das
+    # bleibt das Panel schwarz, und ein OTA allein kann es nicht reparieren.
+    module = module_installieren()
     zustand_schreiben(state_pfad, {"stand": time.time(),
                                    "verfuegbar": False,
                                    "aktuell": str(manifest["version"]),
@@ -437,9 +489,10 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
                                    "units": units,
                                    "rechte": rechte,
                                    "zeit": zeit,
+                                   "module": module,
                                    "fehler": ""})
     return {**ergebnis, "installiert": True, "aktuell": str(manifest["version"]),
-            "units": units, "rechte": rechte, "zeit": zeit}
+            "units": units, "rechte": rechte, "zeit": zeit, "module": module}
 
 
 def units_installieren(ziel: str = STANDARD_ZIEL,
@@ -611,6 +664,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                           help="nur Schreibrechte in /etc/fdc reparieren (als root)")
     zerleger.add_argument("--zeit", action="store_true",
                           help="nur NTP-Zeitquelle einrichten (als root)")
+    zerleger.add_argument("--module", action="store_true",
+                          help="nur fehlende Python-Module nachziehen (als root)")
     args = zerleger.parse_args(argv)
 
     if args.rechte:
@@ -621,6 +676,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.zeit:
         geaendert = zeit_einrichten(args.ziel)
         print(json.dumps({"ok": True, "geaendert": geaendert}, ensure_ascii=False))
+        return 0
+
+    if args.module:
+        pakete = module_installieren()
+        print(json.dumps({"ok": True, "installiert": pakete}, ensure_ascii=False))
         return 0
 
     if args.installieren:

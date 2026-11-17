@@ -1,7 +1,7 @@
 {
-  "version": "0.12.20",
+  "version": "0.12.21",
   "datum": "2026-11-17",
-  "hinweis": "Drehung dreht jetzt das BILD im Panel (Monitor schief verbaut) statt die Anordnung auf dem Schirm; Flaeche bleibt Monitor-Aufloesung",
+  "hinweis": "OTA zieht fehlende Python-Module nach (python3-websocket): Boxen mit altem Image bleiben sonst schwarz, egal wie oft sie updaten",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "29372c804390d3fbec322cbe51d58a8cc4dfb874d2106a6271efb48b4fe47ee6",
-      "bytes": 28781
+      "sha256": "b197431c1c02aa2126d6ecb3aa83674ec487fa664a3ccc5c676854176fd5e7db",
+      "bytes": 31578
     },
     {
       "pfad": "tools/geraet_ident.py",
