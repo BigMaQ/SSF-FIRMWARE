@@ -1,7 +1,7 @@
 {
-  "version": "0.12.15",
+  "version": "0.12.16",
   "datum": "2026-11-17",
-  "hinweis": "Bildschirmschoner greift jetzt auch, wenn von Anfang an kein Bild kam, und auf der Leinwand (ECAM) ebenfalls; Diag-Tafel statt SYSTEMS UNAVAIL bei Geraetefehlern",
+  "hinweis": "Multi-Monitor: fehlt der 2. Schirm am Geraet, wird das als Warnband gezeigt statt Panels stumm zu ueberlagern; FDC nennt die Schirmzahl des Geraets",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "0de2866cd380075ea553318252cbe02e3e64ed49e49f19ed4a5499e827333ce6",
-      "bytes": 49739
+      "sha256": "826aae1f0190838d9ba69ced0e403bcb8e354da5d68699e00126c1fd67492927",
+      "bytes": 51941
     },
     {
       "pfad": "tools/panel_agent.py",

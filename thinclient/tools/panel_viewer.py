@@ -78,6 +78,33 @@ except ImportError:                      # als Skript gestartet
 # ---------------------------------------------------------------------------
 # Fenster für genau ein Panel
 # ---------------------------------------------------------------------------
+#: Schirme, die laut Auftrag existieren müssten, am Gerät aber fehlen
+#: ({"panel": "pfd-fo", "schirm": 1}) — wird als Warnband gezeigt, statt die
+#: Panels stillschweigend übereinander zu legen.
+FEHLENDE_SCHIRME: list[dict] = []
+
+
+def fehlenden_schirm_merken(panel_id: str, schirm: int) -> None:
+    """Festhalten: dieses Panel gehört auf einen Schirm, den es nicht gibt."""
+    eintrag = {"panel": str(panel_id), "schirm": int(schirm)}
+    if eintrag not in FEHLENDE_SCHIRME:
+        FEHLENDE_SCHIRME.append(eintrag)
+
+
+def schirm_warnung(schirme_anzahl: int) -> str:
+    """Ein Satz für das Warnband (deutsch; der Viewer übersetzt nicht)."""
+    if not FEHLENDE_SCHIRME:
+        return ""
+    panel = FEHLENDE_SCHIRME[0]["panel"]
+    schirm = FEHLENDE_SCHIRME[0]["schirm"]
+    weitere = len(FEHLENDE_SCHIRME) - 1
+    text = (f"Schirm {schirm + 1} fehlt (Gerät meldet {schirme_anzahl}) - "
+            f"{panel} liegt auf Schirm 1")
+    if weitere:
+        text += f" (+{weitere} weiteres)"
+    return text
+
+
 class DiagFensterMixin:
     """Selbstauskunft (Diag-Tafel) und Bildschirmschoner — für beide Fensterarten.
 
@@ -169,6 +196,12 @@ class PanelFenster(DiagFensterMixin, QWidget):
             self.setScreen(schirme[screen])
             if vollbild and (w, h) == (0, 0):
                 self.setGeometry(schirme[screen].geometry())
+        elif screen > 0:
+            # Auftrag sagt Schirm 2, am Gerät hängt einer: nicht stumm
+            # übereinanderlegen, sondern merken und auf den ersten Schirm legen.
+            fehlenden_schirm_merken(panel_id, screen)
+            if schirme:
+                self.setScreen(schirme[0])
         self.frame_da.connect(self._frame_anzeigen, Qt.QueuedConnection)
 
     # -- vom Netz ----------------------------------------------------------
@@ -298,6 +331,11 @@ class PanelFenster(DiagFensterMixin, QWidget):
             if bericht is not None:
                 code = panel_lang.sprache()
                 texte = problem_texte(bericht, code)
+                # Fehlender Schirm zuerst: das erklärt, warum zwei Panels
+                # übereinander liegen — dringlicher als eine schiefe Uhr.
+                fehlt = schirm_warnung(len(QApplication.screens()))
+                if fehlt:
+                    texte.insert(0, fehlt)
                 if texte:
                     warnband_zeichnen(maler, QRectF(self.rect()),
                                       panel_lang.text("diag_warnband", code,
@@ -881,6 +919,9 @@ def _leinwand_bauen(layout: Layout, steuerung: _Steuerung, schirme,
     gewuenscht = layout.canvas_screen
     if gewuenscht >= 0 and gewuenscht >= len(schirme):
         # NICHT auf Schirm 0 ausweichen: das würde die PFD/ND-Fenster überdecken.
+        # Aber merken — sonst fehlt die ECAM-Anzeige ohne jede Erklärung.
+        for auftrag in teile:
+            fehlenden_schirm_merken(auftrag.panel, gewuenscht)
         print(f"[viewer] Schirm {gewuenscht} gibt es nicht "
               f"({len(schirme)} vorhanden) — Leinwand übersprungen", flush=True)
         return None
@@ -970,6 +1011,14 @@ class SetupFenster(QWidget):
                          else QColor(61, 220, 132) if "fertig" in text
                          or "installiert" in text else QColor(255, 193, 7))
                 ota_popup(maler, QRectF(self.rect()), text, punkt)
+            # Fehlender Schirm / Geräteproblem: schmales Band, Bild bleibt
+            bericht = self.selbstauskunft()
+            texte = problem_texte(bericht, panel_lang.sprache()) if bericht else []
+            fehlt = schirm_warnung(len(QApplication.screens()))
+            if fehlt:
+                texte.insert(0, fehlt)
+            if texte:
+                warnband_zeichnen(maler, QRectF(self.rect()), texte[0])
             # Bildschirmschoner: liefert kein Teil mehr Bild, wird alles abgedimmt
             self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
                                        self.laengste_stille())
