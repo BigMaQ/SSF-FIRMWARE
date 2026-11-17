@@ -78,7 +78,49 @@ except ImportError:                      # als Skript gestartet
 # ---------------------------------------------------------------------------
 # Fenster für genau ein Panel
 # ---------------------------------------------------------------------------
-class PanelFenster(QWidget):
+class DiagFensterMixin:
+    """Selbstauskunft (Diag-Tafel) und Bildschirmschoner — für beide Fensterarten.
+
+    Panel- und Canvas-Fenster zeigen beide Bilder und beide können ohne Bild
+    dastehen.  Ohne diese gemeinsame Grundlage dimmt nur die eine Hälfte ab —
+    genau das war im Feld zu sehen (ECAM auf Leinwand blieb hell).
+    """
+
+    def _diag_grundwerte(self) -> None:
+        # Bildschirmschoner: nach dieser Zeit ohne Bild wird alles abgedimmt
+        self._dim_nach = float(os.environ.get("FDC_DIM_NACH", "45") or 45)
+        self._dim_staerke = int(os.environ.get("FDC_DIM_ALPHA", "190") or 190)
+        self._gestartet = time.monotonic()
+        #: Selbstauskunft höchstens alle 15 s neu erheben (liest Dateien, fragt nmcli)
+        self._bericht: Optional[object] = None
+        self._bericht_stand = 0.0
+
+    def _stream_aktiv(self):                     # von den Unterklassen gefüllt
+        return None
+
+    def selbstauskunft(self):
+        """Diag-Bericht des Geräts (gecacht)."""
+        jetzt = time.monotonic()
+        if self._bericht is not None and (jetzt - self._bericht_stand) < 15.0:
+            return self._bericht
+        try:
+            self._bericht = panel_selfcheck.laufender_bericht(
+                stream_aktiv=self._stream_aktiv())
+        except Exception:                        # noqa: BLE001 - Diagnose darf nie kippen
+            self._bericht = None
+        self._bericht_stand = jetzt
+        return self._bericht
+
+    def abdunkeln_wenn_noetig(self, maler, flaeche, sekunden: float) -> bool:
+        if self._dim_nach <= 0 or self._dim_staerke <= 0:
+            return False
+        if sekunden < self._dim_nach:
+            return False
+        abdunkeln(maler, flaeche, self._dim_staerke)
+        return True
+
+
+class PanelFenster(DiagFensterMixin, QWidget):
     """Zeigt ein Panel bildschirmfüllend im zugewiesenen Rechteck."""
 
     #: Frame vom Netz-Thread in den GUI-Thread (Qt queued connection)
@@ -108,14 +150,7 @@ class PanelFenster(QWidget):
         self._letzter_frame = 0.0
         #: Im Testbetrieb kommt kein Netzwerkbild - dann auch keine Wartemeldung
         self._testbetrieb = False
-        # Bildschirmschoner bei „kein Bild": nach dieser Zeit wird alles
-        # abgedimmt.  Über die Umgebung abschaltbar (0 = nie).
-        self._dim_nach = float(os.environ.get("FDC_DIM_NACH", "45") or 45)
-        self._dim_staerke = int(os.environ.get("FDC_DIM_ALPHA", "190") or 190)
-        #: Selbstauskunft (Diag-Splash) — höchstens alle 15 s neu erheben,
-        #: weil sie Dateien liest und nmcli befragt.
-        self._bericht: Optional[object] = None
-        self._bericht_stand = 0.0
+        self._diag_grundwerte()
         # Ohne Tastatur/Maus am Client ist eine stumme schwarze Fläche ein
         # Blindflug: der Timer lässt die Wartemeldung auch dann erscheinen,
         # wenn gar keine Frames mehr kommen (und nichts ein Neuzeichnen auslöst).
@@ -172,32 +207,24 @@ class PanelFenster(QWidget):
                 f"{panel_lang.text('engine_frage', code)}")
 
     def _kein_bild_sekunden(self) -> float:
-        return (time.monotonic() - self._letzter_frame) if self._letzter_frame else 0.0
+        """Sekunden ohne Bild — „nie eins bekommen" zählt ab Programmstart.
 
-    def selbstauskunft(self):
-        """Diag-Bericht des Geräts — höchstens alle 15 s neu erhoben.
-
-        ``nmcli`` und Dateizugriffe im Sekundentakt wären Verschwendung; und im
-        Fehlerfall ist ein 15 s alter Befund genauso aussagekräftig.
+        Vorher stand hier ``0.0``, solange noch nie ein Frame ankam.  Damit
+        griff der Bildschirmschoner genau dann nicht, wenn der Stream von
+        Anfang an tot war (Engine aus, Modul fehlt) — also im einzigen Fall,
+        für den er gedacht ist.
         """
-        jetzt = time.monotonic()
-        if self._bericht is not None and (jetzt - self._bericht_stand) < 15.0:
-            return self._bericht
-        try:
-            self._bericht = panel_selfcheck.laufender_bericht(
-                stream_aktiv=bool(self._pixmap is not None and not self._pixmap.isNull()
-                                  and self._kein_bild_sekunden() < 5.0))
-        except Exception:                        # noqa: BLE001 - Diagnose darf nie kippen
-            self._bericht = None
-        self._bericht_stand = jetzt
-        return self._bericht
+        bezug = self._letzter_frame or self._gestartet
+        return max(0.0, time.monotonic() - bezug)
+
+    def _stream_aktiv(self):                     # noqa: D102 (Mixin-Haken)
+        return bool(self._pixmap is not None and not self._pixmap.isNull()
+                    and self._kein_bild_sekunden() < 5.0)
 
     def dimmen(self, maler: QPainter) -> None:
         """Bildschirmschoner: bei langer Bildlosigkeit alles abdimmen."""
-        if self._dim_nach <= 0 or self._dim_staerke <= 0:
-            return
-        if self._kein_bild_sekunden() >= self._dim_nach:
-            abdunkeln(maler, QRectF(self.rect()), self._dim_staerke)
+        self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
+                                   self._kein_bild_sekunden())
 
     def zielrechteck(self) -> tuple[float, float, float, float]:
         """Wohin das Bild gezeichnet wird (x, y, w, h) im Fenster."""
@@ -222,6 +249,7 @@ class PanelFenster(QWidget):
             # schreibt dann pro Frame "endPaint() called with active painter"
             # und die Fläche zeigt nichts mehr.
             maler.end()
+
 
     def _zeichnen(self, maler: QPainter) -> None:
         maler.fillRect(self.rect(), Qt.black)
@@ -312,7 +340,7 @@ class PanelFenster(QWidget):
             maler.drawText(10, 8 + masse.height() - 2, text)
 
 
-class CanvasFenster(QWidget):
+class CanvasFenster(DiagFensterMixin, QWidget):
     """Mehrere Panels auf *einer* gedrehten Fläche.
 
     Gedacht für den ECAM-Monitor, der physisch 45° schief im Panel sitzt: die
@@ -339,6 +367,7 @@ class CanvasFenster(QWidget):
         self.monitor = monitor
         self.teile: dict[str, dict] = {}
         self._testbetrieb = False
+        self._diag_grundwerte()
         self.setWindowTitle("FDC – Canvas")
         self.setStyleSheet("background: black;")
         if vollbild:
@@ -389,10 +418,23 @@ class CanvasFenster(QWidget):
         return len(teil["fenster"]) / 2.0 if teil else 0.0
 
     def keine_bild_sekunden(self, panel_id: str) -> float:
+        """Sekunden ohne Bild für ein Teil — ohne je empfangenes Bild ab Start."""
         teil = self.teile.get(panel_id)
-        if not teil or not teil["letzter"]:
+        if not teil:
             return 0.0
-        return time.monotonic() - teil["letzter"]
+        bezug = teil["letzter"] or self._gestartet
+        return max(0.0, time.monotonic() - bezug)
+
+    def _stream_aktiv(self):                     # noqa: D102 (Mixin-Haken)
+        if not self.teile:
+            return None
+        return any(self.keine_bild_sekunden(p) < 5.0 for p in self.teile)
+
+    def laengste_stille(self) -> float:
+        """Wie lange liefert keins der Teile mehr Bild?"""
+        if not self.teile:
+            return max(0.0, time.monotonic() - self._gestartet)
+        return max(self.keine_bild_sekunden(p) for p in self.teile)
 
     # -- Zeichnen ----------------------------------------------------------
     def _transform(self, maler: QPainter) -> float:
@@ -449,8 +491,13 @@ class CanvasFenster(QWidget):
                                    str(hinweis.get("ssid") or ""),
                                    str(hinweis.get("url") or ""))
                 else:
-                    unavail_zeichnen(maler, QRectF(*teil["rect"]), panel_id,
-                                     self.keine_bild_sekunden(panel_id))
+                    bericht = self.selbstauskunft()
+                    if bericht is not None and getattr(bericht, "fehler", False):
+                        diag_splash_zeichnen(maler, QRectF(*teil["rect"]), bericht,
+                                             panel_lang.sprache())
+                    else:
+                        unavail_zeichnen(maler, QRectF(*teil["rect"]), panel_id,
+                                         self.keine_bild_sekunden(panel_id))
             # Fuge zwischen den Teilen sichtbar machen
             maler.setPen(QPen(QColor(28, 38, 48), 3))
             maler.setBrush(Qt.NoBrush)
@@ -923,6 +970,9 @@ class SetupFenster(QWidget):
                          else QColor(61, 220, 132) if "fertig" in text
                          or "installiert" in text else QColor(255, 193, 7))
                 ota_popup(maler, QRectF(self.rect()), text, punkt)
+            # Bildschirmschoner: liefert kein Teil mehr Bild, wird alles abgedimmt
+            self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
+                                       self.laengste_stille())
         finally:
             maler.end()
 

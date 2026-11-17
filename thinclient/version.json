@@ -1,7 +1,7 @@
 {
-  "version": "0.12.14",
+  "version": "0.12.15",
   "datum": "2026-11-17",
-  "hinweis": "Bildschirmschoner bei kein Bild (abdunkeln), Diag-Tafel mit IP/Netz/Verbindung/Version/Rechten/Uhr bei Geraetefehlern, 4-sprachig, Build-Datum im Abbild gegen unplausible Uhr",
+  "hinweis": "Bildschirmschoner greift jetzt auch, wenn von Anfang an kein Bild kam, und auf der Leinwand (ECAM) ebenfalls; Diag-Tafel statt SYSTEMS UNAVAIL bei Geraetefehlern",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "d82c8da155d7f5d6a28c4aecad8a3744ceda901fe3070702e87854ccceb8f87f",
-      "bytes": 47598
+      "sha256": "0de2866cd380075ea553318252cbe02e3e64ed49e49f19ed4a5499e827333ce6",
+      "bytes": 49739
     },
     {
       "pfad": "tools/panel_agent.py",
