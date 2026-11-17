@@ -1,7 +1,7 @@
 {
-  "version": "0.12.24",
-  "datum": "2026-11-17",
-  "hinweis": "Einrichtungs-AP kommt jetzt wirklich hoch: offener AP ohne wifi-sec-Block (key-mgmt none liess NetworkManager WEP-Schluessel verlangen), Netzliste bleibt bei Neustart erhalten",
+  "version": "0.12.25",
+  "datum": "2026-11-18",
+  "hinweis": "Einrichtung: Portal-DNS (Handy oeffnet die Seite selbst), Verbinden gilt erst mit IPv4 als Erfolg, bei Fehlschlag kommt der AP sofort zurueck, Setup-Hinweis verdeckt im Canvas das alte Bild",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "c1e34df82274035ce324a0793617f5b0d729616ea866333f8793222134abda04",
-      "bytes": 61438
+      "sha256": "14786531acf7d4e24b699a7be332d69c305ffe09aa2263267868191bae27982c",
+      "bytes": 61863
     },
     {
       "pfad": "tools/panel_agent.py",
@@ -35,8 +35,8 @@
     },
     {
       "pfad": "tools/wlan_setup.py",
-      "sha256": "726cd9143ceb7818fa16127980bdbd0d24df0dd0c0c2592e7ccacd046461435c",
-      "bytes": 27391
+      "sha256": "0237e91023984d58797d3c3a39cab0d35cc8d1bff37aeb7df54bf298cdf2a3a2",
+      "bytes": 30393
     },
     {
       "pfad": "tools/ota_update.py",

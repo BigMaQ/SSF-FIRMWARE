@@ -598,14 +598,20 @@ class CanvasFenster(DiagFensterMixin, QWidget):
         maler.setRenderHint(QPainter.Antialiasing, True)
         maler.save()
         self._transform(maler)
+        # Einmal je Bild lesen, nicht je Panel — und wie im Einzel-Panel-Pfad:
+        # liegt ein Einrichtungs-Hinweis an, wird der letzte Frame NICHT mehr
+        # gezeichnet. Sonst stehen die Instrumente als Standbild unter dem
+        # Hinweis und das Panel sieht halb funktionsfähig aus (real passiert:
+        # „kein Splash, aber die Panels sind da").
+        hinweis = {} if self._testbetrieb else setup_hinweis()
         for panel_id, teil in self.teile.items():
             ziel = self._teil_flaeche(teil)
-            if teil["pixmap"] is not None and not teil["pixmap"].isNull():
+            if (not hinweis and teil["pixmap"] is not None
+                    and not teil["pixmap"].isNull()):
                 _bild_gedreht_zeichnen(maler, QRectF(*teil["rect"]), teil["pixmap"],
                                        teil.get("rotate", self.rotate),
                                        teil["scale"], teil["zoom"])
             elif not self._testbetrieb:
-                hinweis = setup_hinweis()
                 if hinweis:
                     setup_zeichnen(maler, QRectF(*teil["rect"]),
                                    str(hinweis.get("ssid") or ""),

@@ -196,6 +196,40 @@ def _hostname() -> str:
         return "client"
 
 
+PORTAL_VERZEICHNIS = "/etc/NetworkManager/dnsmasq-shared.d"
+PORTAL_DATEI = "fdc-portal.conf"
+
+
+def portal_dns_einrichten(adresse: str = AP_ADRESSE) -> bool:
+    """Handy soll den Hinweis „Anmeldung im Netzwerk nötig" von selbst oeffnen.
+
+    NetworkManagers dnsmasq beantwortet im AP-Modus normale DNS-Anfragen. Die
+    Erreichbarkeitspruefungen der Handys (``connectivitycheck.gstatic.com`` bei
+    Android, ``captive.apple.com`` bei iOS) bekommen dann eine echte Antwort und
+    das Geraet denkt, alles sei in Ordnung — der Nutzer muss die Adresse von Hand
+    eintippen. Der DNS-Drop-in beantwortet **jede** Anfrage mit der Box und
+    schickt die Portal-Adresse per DHCP mit (Option 114 = RFC 8910, 160 = aeltere
+    Android-Geraete). Dann erscheint die Einrichtungsseite wie bei jedem Hotel-WLAN.
+    """
+    ip = str(adresse).split("/")[0]
+    inhalt = ("# FDC-Einrichtung: alle Namensaufloesungen auf die Box zeigen,\n"
+              "# damit Handys die Einrichtungsseite selbst oeffnen.\n"
+              f"address=/#/{ip}\n"
+              f"dhcp-option=114,http://{ip}/\n"
+              f"dhcp-option=160,http://{ip}/\n")
+    pfad = Path(PORTAL_VERZEICHNIS) / PORTAL_DATEI
+    try:
+        pfad.parent.mkdir(parents=True, exist_ok=True)
+        if not pfad.exists() or pfad.read_text(encoding="utf-8") != inhalt:
+            pfad.write_text(inhalt, encoding="utf-8")
+            os.chmod(pfad, 0o644)
+        return True
+    except OSError as exc:
+        print(f"[wlan-setup] Portal-DNS nicht eingerichtet: {exc}", file=sys.stderr,
+              flush=True)
+        return False
+
+
 def ap_starten(ssid: Optional[str] = None, passwort: Optional[str] = None) -> tuple[bool, str]:
     """Einrichtungs-AP hochziehen (NetworkManager, DHCP/DNS inklusive).
 
@@ -210,6 +244,7 @@ def ap_starten(ssid: Optional[str] = None, passwort: Optional[str] = None) -> tu
     ssid = ssid or ap_ssid()
     psk = (passwort if passwort is not None
            else os.environ.get("FDC_SETUP_PSK", "")).strip()
+    portal_dns_einrichten()          # damit das Handy die Seite selbst öffnet
     nmcli("connection", "delete", AP_NAME, timeout=12)      # Reste aufräumen
     # Drei Anläufe, vom ausführlichen zum schlichten Aufruf. Grund: welche
     # Eigenschaft eine WLAN-Firmware (hier mwifiex/mlan0) ablehnt, ist von
@@ -274,6 +309,25 @@ def ap_laeuft() -> bool:
     return any(zeile and zeile[0] == AP_NAME for zeile in terse_felder(aus))
 
 
+def verbinden_und_zurueck(ssid: str, passwort: str,
+                          karte: Optional[str] = None) -> tuple[bool, str]:
+    """Wie ``verbinden``, aber ohne die Box offline zurueckzulassen.
+
+    Der AP muss fuer den Verbindungsversuch weichen (eine Karte kann nicht
+    gleichzeitig AP und Station sein). Scheitert der Versuch, wird der AP sofort
+    wieder aufgebaut — sonst bleibt ein Client zurueck, den niemand mehr
+    erreicht: kein LAN, kein WLAN, kein Hotspot.
+    """
+    ok, meldung = verbinden(ssid, passwort, karte)
+    if not ok:
+        wieder, ap_meldung = ap_starten()
+        if wieder:
+            meldung = f"{meldung} — Einrichtungs-AP ist wieder da ({ap_meldung})"
+        else:
+            meldung = f"{meldung} — AP-Neustart fehlgeschlagen: {ap_meldung}"
+    return ok, meldung
+
+
 def verbinden(ssid: str, passwort: str, karte: Optional[str] = None) -> tuple[bool, str]:
     """Mit einem WLAN verbinden und als Profil merken."""
     karte = karte or wlan_karte()
@@ -291,9 +345,18 @@ def verbinden(ssid: str, passwort: str, karte: Optional[str] = None) -> tuple[bo
     if karte:
         args += ["ifname", karte]
     rc, aus = nmcli(*args, timeout=55)
-    if rc == 0:
-        return True, f"verbunden mit {ssid}"
-    return False, (aus or "Verbindung fehlgeschlagen")[:300]
+    if rc != 0:
+        return False, (aus or "Verbindung fehlgeschlagen")[:300]
+    # rc == 0 heisst nur „Assoziation und Aktivierung durch". Ohne Adresse ist
+    # die Box im WLAN aber nicht erreichbar — real passiert: Seite meldete
+    # Erfolg, Box hatte keine IP, und weil der AP schon weg war, kam niemand
+    # mehr dran.
+    for _ in range(12):                     # bis ~24 s auf DHCP warten
+        if _hat_ipv4(karte):
+            return True, f"verbunden mit {ssid}"
+        time.sleep(2)
+    return False, ("Verbunden, aber keine Adresse bekommen (DHCP) — "
+                   "Passwort/Netz prüfen")
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +510,7 @@ def ist_portal_probe(pfad: str) -> bool:
 # ---------------------------------------------------------------------------
 def baue_handler(state_pfad: str, ssid: str,
                  adresse: "str | Callable[[], str]",
-                 verbinder: Callable[[str, str], tuple[bool, str]] = verbinden,
+                 verbinder: Callable[[str, str], tuple[bool, str]] = verbinden_und_zurueck,
                  scanner: Callable[[], list] = netze_scannen):
     """Handler bauen.  ``adresse`` darf eine Funktion sein (Adresse erst nach dem
     Binden des Ports bekannt — so bleibt der Test ohne feste IP möglich)."""
