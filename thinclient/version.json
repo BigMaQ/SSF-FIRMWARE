@@ -1,7 +1,7 @@
 {
-  "version": "0.12.21",
+  "version": "0.12.22",
   "datum": "2026-11-17",
-  "hinweis": "OTA zieht fehlende Python-Module nach (python3-websocket): Boxen mit altem Image bleiben sonst schwarz, egal wie oft sie updaten",
+  "hinweis": "Erstlauf haertet sich selbst: halb fertiges dpkg wird repariert (sonst fehlt der X-Server und das Panel startet nie), der Reboot wartet auf das laufende OTA, fehlende Dateien in /opt/fdc werden nachgezogen; waehrend der Einrichtung verweigert der Agent Neustart",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -20,8 +20,8 @@
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "1e3ea97abd3a0a9d214b7e220bb64f336352059ca0aa3a96bdf0a1208a668135",
-      "bytes": 46928
+      "sha256": "76276a80eb38ec0f167e0cb7453de35b7e15cc235ccb221a95d1686e27b5c2cb",
+      "bytes": 47502
     },
     {
       "pfad": "tools/panel_diag.py",
@@ -107,6 +107,11 @@
       "pfad": "timesyncd.conf",
       "sha256": "c35c8307105ed088b212d705a847d5ce899bf3213de049cf1116c15d32edd620",
       "bytes": 950
+    },
+    {
+      "pfad": "firstboot.sh",
+      "sha256": "d3618d4d368b507189aadbdcbe6d75a44e8c53a18ea2d0a37b8661a7f4c637fe",
+      "bytes": 12611
     }
   ]
 }

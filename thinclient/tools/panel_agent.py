@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import Optional
 
 VERSION = "1.0.0"
+#: Solange diese Datei existiert, laeuft die Einrichtung (apt) — Neustart gesperrt.
+FIRSTBOOT_MARKER = "/var/lib/fdc/.firstboot-laeuft"
 STANDARD_LAYOUT = "/etc/fdc/panels.json"
 #: Geraete-Identitaet: Name + Zuordnung "Monitor 1/2 -> bis zu 2 Panels".
 STANDARD_GERAET = "/etc/fdc/geraet.json"
@@ -466,6 +468,12 @@ class System:
             befehl = "reboot"
         else:
             return False, "aktion muss reboot oder poweroff sein"
+        # Waehrend der ersten Einrichtung laeuft apt. Ein Neustart mitten darin
+        # hinterlaesst ein halb konfiguriertes dpkg (X-Server fehlt, Viewer
+        # startet nie) — deshalb hier hart verweigern statt spaeter reparieren.
+        if Path(FIRSTBOOT_MARKER).exists():
+            return False, ("Einrichtung laeuft noch — Neustart gesperrt, "
+                           "bitte warten (Log: /var/lib/fdc/firstboot.log)")
         zeile = self._praefix + ["/usr/bin/systemctl", befehl]
         try:
             subprocess.Popen(zeile, stdout=subprocess.DEVNULL,
