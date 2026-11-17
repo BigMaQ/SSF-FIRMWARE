@@ -252,18 +252,20 @@ def layout_aus_geraet(geraet: dict, schirme: Optional[list] = None,
         breite, hoehe = _schirmgroesse(schirme, index)
         gedreht_hier = bool(gedreht[index]) if index < len(gedreht) else False
         if gedreht_hier:
-            # Gedrehte Leinwand: 1080x1920 bei 90° -> liegt quer auf 1920x1080.
+            # „gedreht" heißt: der Monitor ist schief verbaut, das **Bild** wird
+            # ausgeglichen.  Die Fläche bleibt die echte Monitor-Größe, die
+            # Anordnung (halbe/halbe) bleibt wie beim normalen Schirm — sonst
+            # wandern die Panels auf dem Schirm an andere Plätze.
             dreh = int((eintraege[0] or {}).get("rotate") or 90)
-            canvas_w, canvas_h = hoehe, breite
-            leinwaende.append({"screen": index, "width": canvas_w,
-                               "height": canvas_h, "rotate": dreh})
+            leinwaende.append({"screen": index, "width": breite,
+                               "height": hoehe, "rotate": dreh})
             teile = len(eintraege)
-            teil_hoehe = canvas_h // teile
+            teil_breite = breite // teile
             for nummer, eintrag in enumerate(eintraege):
                 layout["panels"].append({
                     "panel": str(eintrag["panel"]).strip(),
-                    "screen": index, "x": 0, "y": nummer * teil_hoehe,
-                    "width": canvas_w, "height": teil_hoehe,
+                    "screen": index, "x": nummer * teil_breite, "y": 0,
+                    "width": teil_breite, "height": hoehe,
                     "fps": int(eintrag.get("fps") or fps),
                     "canvas": True,
                 })

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 import sys
@@ -130,6 +131,49 @@ def schirm_warnung(schirme_anzahl: int, panels=None) -> str:
     return text
 
 
+def _bild_gedreht_zeichnen(maler: QPainter, ziel: QRectF, pix,
+                           rotate: float, scale: str, zoom: float) -> None:
+    """Ein Bild in ``ziel`` zeichnen — **Bild gedreht, Position unverändert**.
+
+    ``rotate`` ist die Ausgleichsdrehung für einen schief verbauten Monitor
+    (z. B. 90, weil das Gerät hochkant steht): gedreht wird das Bild um die Mitte
+    seines Rechtecks, nicht die Anordnung.  Bei 90/270 tauschen Breite und Höhe
+    für die Einpassung, sonst würde ein Quadrat breitgezogen.
+    """
+    if pix is None or pix.isNull() or ziel.width() <= 0 or ziel.height() <= 0:
+        return
+    grad = float(rotate or 0.0) % 360.0
+    if abs(grad) < 0.01:
+        breite, hoehe = ziel.width(), ziel.height()
+    elif abs(grad - 180.0) < 0.01:
+        breite, hoehe = ziel.width(), ziel.height()
+    else:
+        # beliebige Drehung: Platz ist die gedrehte Bounding-Box des Rechtecks
+        bogen = math.radians(grad)
+        cv, sv = abs(math.cos(bogen)), abs(math.sin(bogen))
+        breite = ziel.width() * cv + ziel.height() * sv
+        hoehe = ziel.width() * sv + ziel.height() * cv
+    maler.save()
+    maler.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    maler.translate(ziel.center())
+    if abs(grad) > 0.01:
+        maler.rotate(grad)
+    # Innenrechteck in gedrehten Koordinaten: bei 90/270 sind die Kanten getauscht
+    innen_w, innen_h = (ziel.height(), ziel.width()) if int(round(grad)) % 180 \
+        else (ziel.width(), ziel.height())
+    pw, ph = pix.width(), pix.height()
+    if scale == "stretch":
+        maler.drawPixmap(QRectF(-innen_w / 2, -innen_h / 2, innen_w, innen_h),
+                         pix, QRectF(pix.rect()))
+    else:
+        faktor = ((max if scale == "cover" else min)(innen_w / max(1, pw),
+                                                     innen_h / max(1, ph))
+                  * max(0.1, float(zoom or 1.0)))
+        w, h = pw * faktor, ph * faktor
+        maler.drawPixmap(QRectF(-w / 2, -h / 2, w, h), pix, QRectF(pix.rect()))
+    maler.restore()
+
+
 class DiagFensterMixin:
     """Selbstauskunft (Diag-Tafel) und Bildschirmschoner — für beide Fensterarten.
 
@@ -182,9 +226,12 @@ class PanelFenster(DiagFensterMixin, QWidget):
                  screen: int = 0, vollbild: bool = True,
                  strecken: bool = False, debug: bool = False,
                  scale: str = "contain", zoom: float = 1.0,
-                 diag: bool = False, monitor: Optional["DiagMonitor"] = None) -> None:
+                 diag: bool = False, monitor: Optional["DiagMonitor"] = None,
+                 rotate: float = 0.0) -> None:
         super().__init__()
         self.panel_id = panel_id
+        #: Ausgleichsdrehung des Bildes (Monitor schief verbaut) — nicht der Ort
+        self.rotate = float(rotate or 0.0)
         #: Diag-Overlay (GlassOut/Sim/FDC/Bildrate/CPU) — vom FDC geschaltet
         self.diag = diag
         self.monitor = monitor
@@ -319,11 +366,13 @@ class PanelFenster(DiagFensterMixin, QWidget):
         # Panel sieht halb funktionsfähig aus (real so gesehen, nachdem
         # GlassOut wegbricht).  Ein blankes Feld mit Meldung ist die Wahrheit.
         if not meldung and not hinweis and self._pixmap is not None and not self._pixmap.isNull():
-            maler.setRenderHint(QPainter.SmoothPixmapTransform, True)
             x, y, w, h = self.zielrechteck()
             # Überstand (cover/zoom) wird vom Fenster beschnitten - genau das
             # braucht man, wenn das Bild in einen MIP-Ausschnitt passen soll.
-            maler.drawPixmap(QRectF(x, y, w, h), self._pixmap, QRectF(self._pixmap.rect()))
+            # Gedreht wird nur das Bild, nie der Platz (Ausgleich für einen
+            # hochkant verbauten Monitor).
+            _bild_gedreht_zeichnen(maler, QRectF(x, y, w, h), self._pixmap,
+                                   self.rotate, self.scale, self.zoom)
         if hinweis:
             # Kein Netz: der Client wartet auf die WLAN-Einrichtung über das
             # Handy — die Anleitung ist wichtiger als „SYSTEMS UNAVAIL".
@@ -446,11 +495,13 @@ class CanvasFenster(DiagFensterMixin, QWidget):
     # -- Aufbau ------------------------------------------------------------
     def teil_anlegen(self, panel_id: str, rect: tuple[int, int, int, int],
                      scale: str = "contain", diag: bool = False,
-                     zoom: float = 1.0) -> None:
+                     zoom: float = 1.0, rotate: Optional[float] = None) -> None:
         self.teile[str(panel_id)] = {
             "rect": (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])),
             "scale": scale or "contain",
             "zoom": max(0.1, min(4.0, float(zoom or 1.0))),
+            # Drehung gilt dem BILD in diesem Rechteck, nicht dem Platz
+            "rotate": float(self.rotate if rotate is None else rotate),
             "pixmap": None, "letzter": 0.0, "bisher": 0,
             "kb": 0.0, "fenster": [], "diag": bool(diag),
         }
@@ -503,17 +554,19 @@ class CanvasFenster(DiagFensterMixin, QWidget):
 
     # -- Zeichnen ----------------------------------------------------------
     def _transform(self, maler: QPainter) -> float:
-        """Fläche so einpassen, dass das *gedrehte* Rechteck ins Fenster passt."""
-        import math
-        bogen = math.radians(self.rotate)
-        cv, sv = abs(math.cos(bogen)), abs(math.sin(bogen))
-        bbox_w = self.canvas_w * cv + self.canvas_h * sv
-        bbox_h = self.canvas_w * sv + self.canvas_h * cv
-        faktor = min(self.width() / bbox_w, self.height() / bbox_h) * self.zoom
-        maler.translate(self.width() / 2.0, self.height() / 2.0)
-        maler.rotate(self.rotate)
+        """Leinwand einpassen — **ohne** Drehung.
+
+        ``rotate`` dreht nur noch das Bild in jedem Teil (Ausgleich für einen
+        schief verbauten Monitor).  Vorher wurde die ganze Fläche gedreht: dann
+        wanderten die Panels auf dem Schirm an andere Plätze, und genau das war
+        falsch (Feldbefund 17.11.).
+        """
+        faktor = min(self.width() / max(1, self.canvas_w),
+                     self.height() / max(1, self.canvas_h)) * self.zoom
+        links = (self.width() - self.canvas_w * faktor) / 2.0
+        oben = (self.height() - self.canvas_h * faktor) / 2.0
+        maler.translate(links, oben)
         maler.scale(faktor, faktor)
-        maler.translate(-self.canvas_w / 2.0, -self.canvas_h / 2.0)
         return faktor
 
     @staticmethod
@@ -547,8 +600,9 @@ class CanvasFenster(DiagFensterMixin, QWidget):
         for panel_id, teil in self.teile.items():
             ziel = self._teil_flaeche(teil)
             if teil["pixmap"] is not None and not teil["pixmap"].isNull():
-                maler.drawPixmap(ziel, teil["pixmap"],
-                                 QRectF(teil["pixmap"].rect()))
+                _bild_gedreht_zeichnen(maler, QRectF(*teil["rect"]), teil["pixmap"],
+                                       teil.get("rotate", self.rotate),
+                                       teil["scale"], teil["zoom"])
             elif not self._testbetrieb:
                 hinweis = setup_hinweis()
                 if hinweis:
@@ -745,6 +799,9 @@ class PanelAuftrag:
     offset_y: int = 0
     #: Diag-Overlay auf diesem Panel (GlassOut/Sim/FDC/Bildrate/CPU)
     diag: bool = False
+    #: Ausgleichsdrehung des **Bildes** in Grad (Monitor schief verbaut):
+    #: gedreht wird das Bild im Rechteck, nicht die Anordnung auf dem Schirm.
+    rotate: float = 0.0
     #: Dieses Panel liegt auf der gedrehten Leinwand statt in einem eigenen Fenster
     auf_leinwand: bool = False
 
@@ -804,6 +861,19 @@ class Layout:
     #: gültig und wird wie eine Leinwand behandelt.
     leinwaende: list = field(default_factory=list)
 
+    def rotation_fuer(self, screen: int) -> float:
+        """Ausgleichsdrehung des Bildes für einen Schirm.
+
+        Quelle ist die Leinwand dieses Schirms (``leinwaende``), sonst die alte
+        Einzel-Angabe ``canvas`` — und nur, wenn sie zu diesem Schirm gehört.
+        """
+        for eintrag in self.leinwaende or []:
+            if int(eintrag.get("screen") or 0) == int(screen):
+                return float(eintrag.get("rotate") or 0.0)
+        if int(self.canvas_screen) in (int(screen), -1):
+            return float(self.rotate or 0.0)
+        return 0.0
+
 
 def _rect(text: str) -> tuple[int, int, int, int]:
     teile = [int(t) for t in str(text).replace(" ", "").split(",")]
@@ -860,6 +930,8 @@ def layout_aus_datei(pfad: str) -> Layout:
             strecken=bool(eintrag.get("strecken", False)),
             test=bool(eintrag.get("test", False)),
             position=str(eintrag.get("position") or "full"),
+            rotate=float(eintrag.get("rotate") if eintrag.get("rotate") is not None
+                         else 0.0),
             width=int(eintrag.get("width") or 0),
             height=int(eintrag.get("height") or 0),
             offset_x=int(eintrag.get("offset_x") or eintrag.get("x") or 0),
@@ -871,6 +943,18 @@ def layout_aus_datei(pfad: str) -> Layout:
                       or ("stretch" if eintrag.get("strecken") else "contain")),
             zoom=float(eintrag.get("zoom") or 1.0),
         ))
+    # Alte Layouts (eine ``canvas``-Fläche, Panels ohne ``screen``): dort gehören
+    # alle Teile zum Schirm dieser Leinwand — sonst landet nichts auf ihr.
+    if not leinwaende and roh.get("canvas"):
+        standard = max(0, int(flaeche.get("screen", -1)))
+        for auftrag in layout.panels:
+            if not auftrag.screen:
+                auftrag.screen = standard
+    # Bild-Drehung: ohne eigene Angabe am Panel gilt die Drehung der Leinwand
+    # seines Schirms (Ausgleich für den schief verbauten Monitor).
+    for auftrag in layout.panels:
+        if not auftrag.rotate:
+            auftrag.rotate = layout.rotation_fuer(auftrag.screen)
     return layout
 
 
@@ -1014,7 +1098,8 @@ def _leinwand_bauen(layout: Layout, steuerung: _Steuerung, schirme,
                     auftrag.width or canvas_w,
                     auftrag.height or standard_hoehe)
             canvas.teil_anlegen(auftrag.panel, rect, scale=auftrag.scale,
-                                diag=auftrag.diag, zoom=auftrag.zoom)
+                                diag=auftrag.diag, zoom=auftrag.zoom,
+                                rotate=auftrag.rotate)
         for auftrag in meine:
             if auftrag.test:
                 canvas._testbetrieb = True
@@ -1130,7 +1215,8 @@ def fenster_bauen(layout: "Layout", schirme, monitor=None, steuerung=None):
         win = PanelFenster(auftrag.panel, rect, auftrag.screen,
                            vollbild=layout.vollbild, strecken=auftrag.strecken,
                            debug=layout.debug, scale=auftrag.scale,
-                           zoom=auftrag.zoom, diag=auftrag.diag, monitor=monitor)
+                           zoom=auftrag.zoom, diag=auftrag.diag, monitor=monitor,
+                           rotate=auftrag.rotate)
         gebaut.append((auftrag, win, rect))
     return gebaut
 

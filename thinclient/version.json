@@ -1,7 +1,7 @@
 {
-  "version": "0.12.19",
+  "version": "0.12.20",
   "datum": "2026-11-17",
-  "hinweis": "Screen 1/2 als Knoepfe: jede Leinwand zeigt nur ihre eigenen Panels (leinwaende), Flaeche und Drehung je Schirm; kein Not-Config-Splash mehr, wenn nur der Schirm fehlt; Canvas-Dimmer und Warnband wieder aktiv",
+  "hinweis": "Drehung dreht jetzt das BILD im Panel (Monitor schief verbaut) statt die Anordnung auf dem Schirm; Flaeche bleibt Monitor-Aufloesung",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "af31fd5cad2c493ef3c9aa073bd9e3ecc9f8c7f1a5182d38ce9c33927911628f",
-      "bytes": 56999
+      "sha256": "f23c8d7f7bcbb5918d8c2d73c69521e934848fdee6dee09cb76e58bf0870d0a9",
+      "bytes": 61308
     },
     {
       "pfad": "tools/panel_agent.py",
@@ -45,8 +45,8 @@
     },
     {
       "pfad": "tools/geraet_ident.py",
-      "sha256": "68068f3a19055cf8c1844cd083509a5e90961e5f5ea16cc4ed40e2970be3135a",
-      "bytes": 11758
+      "sha256": "ee55c1a8f0d9c2bf8783aac02a877ff01b3a5a14f89778ab873b6c65e93b7433",
+      "bytes": 11933
     },
     {
       "pfad": "tools/power_idle.py",
