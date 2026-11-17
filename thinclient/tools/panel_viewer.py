@@ -92,14 +92,18 @@ def fehlenden_schirm_merken(panel_id: str, schirm: int) -> None:
 
 
 def schirm_warnung(schirme_anzahl: int) -> str:
-    """Ein Satz für das Warnband (deutsch; der Viewer übersetzt nicht)."""
+    """Ein Satz für das Warnband (deutsch; der Viewer übersetzt nicht).
+
+    Wichtig: das Panel wird **nicht** angezeigt (nicht auf Schirm 1 geschoben) —
+    der Text sagt das auch so, sonst sucht man es am falschen Ort.
+    """
     if not FEHLENDE_SCHIRME:
         return ""
     panel = FEHLENDE_SCHIRME[0]["panel"]
     schirm = FEHLENDE_SCHIRME[0]["schirm"]
     weitere = len(FEHLENDE_SCHIRME) - 1
     text = (f"Schirm {schirm + 1} fehlt (Gerät meldet {schirme_anzahl}) - "
-            f"{panel} liegt auf Schirm 1")
+            f"{panel} wird nicht angezeigt")
     if weitere:
         text += f" (+{weitere} weiteres)"
     return text

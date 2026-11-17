@@ -1,7 +1,7 @@
 {
-  "version": "0.12.17",
+  "version": "0.12.18",
   "datum": "2026-11-17",
-  "hinweis": "Monitore getrennt behandelt: fehlt ein Schirm, wird die Aufloesung von Monitor 1 geliehen und es werden dort keine Panels angezeigt (Konfiguration bleibt schreibbar)",
+  "hinweis": "Klarstellung im Warnband: Panel auf fehlendem Schirm wird nicht angezeigt (statt falsch auf Schirm 1 zu verweisen)",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "9a625b7e045c92b758530d6854e23dd15bf7bc07b9b0733c342cbcb39e1e30c4",
-      "bytes": 52896
+      "sha256": "2b366862e10de4fa3df1ecb0ce8581b49ac9611e4d7783ca28c546cc9488c971",
+      "bytes": 53054
     },
     {
       "pfad": "tools/panel_agent.py",
