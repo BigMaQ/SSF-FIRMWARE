@@ -190,14 +190,42 @@ def geraet_aus_layout(layout: dict, mac: str = "", schirme: Optional[list] = Non
 # --------------------------------------------------------------------------
 # Layout aus der Zuordnung bauen
 # --------------------------------------------------------------------------
-def _schirmgroesse(schirme: list, index: int) -> tuple[int, int]:
-    """Breite/Hoehe eines Schirms aus ``[{"modus": "1920x1080+0+0"}, …]``."""
-    if 0 <= index < len(schirme or []):
-        modus = str((schirme[index] or {}).get("modus") or "")
-        treffer = re.match(r"(\d+)x(\d+)", modus)
+def schirmgroesse(schirme: list, index: int) -> tuple[int, int, str]:
+    """(Breite, Höhe, Herkunft) für den Schirm *index* (0-basiert).
+
+    Monitore werden **einzeln** behandelt: jeder Schirm, den das Gerät meldet,
+    liefert seine eigene Auflösung.  Meldet es einen Schirm nicht (Kabel nicht
+    dran, xrandr kennt ihn nicht), wird die Auflösung des **ersten** gemeldeten
+    Schirms geliehen — nicht eine Fantasiezahl.  1920×1080 bleibt nur die letzte
+    Rückfallebene, wenn das Gerät gar nichts meldet.
+    """
+    gemeldet = [s for s in (schirme or []) if isinstance(s, dict)]
+    treffer = _aufloesung(gemeldet, index)
+    if treffer:
+        return treffer[0], treffer[1], "gemeldet"
+    leihe = _aufloesung(gemeldet, 0)
+    if leihe:
+        return leihe[0], leihe[1], "geliehen"
+    return 1920, 1080, "Vorgabe"
+
+
+def _aufloesung(schirme: list, index: int) -> Optional[tuple[int, int]]:
+    """Auflösung eines gemeldeten Schirms, ``None`` wenn er fehlt."""
+    if not (0 <= index < len(schirme or [])):
+        return None
+    schirm = schirme[index] or {}
+    for feld in ("aufloesung", "modus"):
+        text = str(schirm.get(feld) or "")
+        treffer = re.match(r"(\d+)x(\d+)", text)
         if treffer:
             return int(treffer.group(1)), int(treffer.group(2))
-    return 1920, 1080
+    return None
+
+
+def _schirmgroesse(schirme: list, index: int) -> tuple[int, int]:
+    """Nur Breite/Höhe — Kurzform für das Layout."""
+    breite, hoehe, _ = schirmgroesse(schirme, index)
+    return breite, hoehe
 
 
 def layout_aus_geraet(geraet: dict, schirme: Optional[list] = None,

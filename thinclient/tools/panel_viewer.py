@@ -197,11 +197,12 @@ class PanelFenster(DiagFensterMixin, QWidget):
             if vollbild and (w, h) == (0, 0):
                 self.setGeometry(schirme[screen].geometry())
         elif screen > 0:
-            # Auftrag sagt Schirm 2, am Gerät hängt einer: nicht stumm
-            # übereinanderlegen, sondern merken und auf den ersten Schirm legen.
+            # Auftrag sagt Schirm 2, am Gerät hängt einer.  Merken — der
+            # Viewer baut solche Fenster gar nicht mehr (siehe main()).  Wer
+            # dieses Fenster trotzdem erzeugt, bekommt es auf dem Hauptschirm
+            # ohne Ausweich-Logik zu sehen; die Anzeige ist dann bewusst die
+            # des Aufrufers, nicht unsere stille Notlösung.
             fehlenden_schirm_merken(panel_id, screen)
-            if schirme:
-                self.setScreen(schirme[0])
         self.frame_da.connect(self._frame_anzeigen, Qt.QueuedConnection)
 
     # -- vom Netz ----------------------------------------------------------
@@ -1026,6 +1027,36 @@ class SetupFenster(QWidget):
             maler.end()
 
 
+def fenster_bauen(layout: "Layout", schirme, monitor=None, steuerung=None):
+    """Panels ohne Leinwand als Fenster anlegen — Rückgabe [(auftrag, fenster, rect)].
+
+    Ein Panel, dessen Schirm das Gerät nicht meldet, wird **nicht** gebaut: die
+    Konfiguration bleibt gültig (das Gerät speichert sie), aber ein nicht
+    angeschlossener Monitor zeigt keine Panels, statt sie auf Schirm 1
+    übereinanderzulegen.  Gemerkt wird es trotzdem (`FEHLENDE_SCHIRME`), damit
+    der Betreiber am Bildschirm sieht, warum etwas fehlt.
+    """
+    gebaut: list = []
+    for auftrag in (a for a in layout.panels if not a.auf_leinwand):
+        if schirme and not (0 <= auftrag.screen < len(schirme)):
+            fehlenden_schirm_merken(auftrag.panel, auftrag.screen)
+            print(f"[viewer] Schirm {auftrag.screen + 1} gibt es nicht "
+                  f"({len(schirme)} vorhanden) - {auftrag.panel} bleibt aus",
+                  flush=True)
+            continue
+        idx = auftrag.screen if 0 <= auftrag.screen < len(schirme) else 0
+        geo = schirme[idx].geometry() if schirme else None
+        schirm = ((geo.x(), geo.y(), geo.width(), geo.height()) if geo
+                  else (0, 0, 1920, 1080))
+        rect = rect_berechnen(auftrag, schirm)
+        win = PanelFenster(auftrag.panel, rect, auftrag.screen,
+                           vollbild=layout.vollbild, strecken=auftrag.strecken,
+                           debug=layout.debug, scale=auftrag.scale,
+                           zoom=auftrag.zoom, diag=auftrag.diag, monitor=monitor)
+        gebaut.append((auftrag, win, rect))
+    return gebaut
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     layout = layout_aus_argumenten(list(argv if argv is not None else sys.argv[1:]))
     app = QApplication(sys.argv[:1])
@@ -1040,22 +1071,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Panels mit "canvas": true gehören auf die gedrehte Leinwand, alle anderen
     # in ein eigenes Fenster.  Beides gleichzeitig ist der Normalfall: PFD/ND als
     # Fenster auf Schirm 0, die ECAM-Leinwand auf Schirm 1.
-    fenster_panels = [a for a in layout.panels if not a.auf_leinwand]
-    fenster: list[PanelFenster] = []
-    rechtecke: list[tuple[int, int, int, int]] = []
-    for auftrag in fenster_panels:
-        idx = auftrag.screen if 0 <= auftrag.screen < len(schirme) else 0
-        geo = schirme[idx].geometry() if schirme else None
-        schirm = ((geo.x(), geo.y(), geo.width(), geo.height()) if geo
-                  else (0, 0, 1920, 1080))
-        rect = rect_berechnen(auftrag, schirm)
-        rechtecke.append(rect)
-        fenster.append(PanelFenster(auftrag.panel, rect, auftrag.screen,
-                                    vollbild=layout.vollbild,
-                                    strecken=auftrag.strecken, debug=layout.debug,
-                                    scale=auftrag.scale, zoom=auftrag.zoom,
-                                    diag=auftrag.diag, monitor=monitor))
-    for auftrag, win, rect in zip(fenster_panels, fenster, rechtecke):
+    gebaut = fenster_bauen(layout, schirme, monitor, steuerung)
+    fenster = [win for _, win, _ in gebaut]
+    for auftrag, win, rect in gebaut:
         cfg = StreamConfig(slug=auftrag.panel, panel_id=auftrag.panel,
                            width=rect[2] or 1024, height=rect[3] or 1024,
                            fps=float(auftrag.fps), source="glassout",

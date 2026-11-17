@@ -1,7 +1,7 @@
 {
-  "version": "0.12.16",
+  "version": "0.12.17",
   "datum": "2026-11-17",
-  "hinweis": "Multi-Monitor: fehlt der 2. Schirm am Geraet, wird das als Warnband gezeigt statt Panels stumm zu ueberlagern; FDC nennt die Schirmzahl des Geraets",
+  "hinweis": "Monitore getrennt behandelt: fehlt ein Schirm, wird die Aufloesung von Monitor 1 geliehen und es werden dort keine Panels angezeigt (Konfiguration bleibt schreibbar)",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "826aae1f0190838d9ba69ced0e403bcb8e354da5d68699e00126c1fd67492927",
-      "bytes": 51941
+      "sha256": "9a625b7e045c92b758530d6854e23dd15bf7bc07b9b0733c342cbcb39e1e30c4",
+      "bytes": 52896
     },
     {
       "pfad": "tools/panel_agent.py",
@@ -45,8 +45,8 @@
     },
     {
       "pfad": "tools/geraet_ident.py",
-      "sha256": "e404e45c89d967a3daebf32dae3f312518bfcda18c9d6dfbda0c593245760ded",
-      "bytes": 10013
+      "sha256": "90aabbe159b5a76c5c08be8cc8746d4c843357517b1df93a232929e71152fd06",
+      "bytes": 11125
     },
     {
       "pfad": "tools/power_idle.py",
