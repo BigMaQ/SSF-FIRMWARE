@@ -948,6 +948,26 @@ class Beacon(threading.Thread):
                 f"IP:{eigene_ip()};PORT:{self.agent_port};"
                 f"FW:{self.version};HW:thinclient;SN:{sn};")
 
+    def ziele(self) -> list[tuple[str, int]]:
+        """Wohin das IDENT geht: Broadcast **und** die bekannte FDC-Adresse.
+
+        Broadcast bleibt im eigenen VLAN — ein Client, der per WLAN in einem
+        anderen Netz landet (192.168.10.x vs. FDC in 192.168.20.x), war für den
+        FDC unsichtbar. Sobald ein Beacon vom FDC ankam, kennen wir seine
+        Adresse und schicken direkt dorthin; der FDC lernt unsere IP dabei aus
+        dem Absender, also ist auch ein DHCP-Wechsel erledigt.
+        """
+        liste: list[tuple[str, int]] = [("255.255.255.255", self.port)]
+        fdc = ""
+        try:
+            if power_idle is not None:
+                fdc = power_idle.fdc_adresse_lesen()
+        except Exception:                    # noqa: BLE001 - Beacon darf nie kippen
+            fdc = ""
+        if fdc and (fdc, self.port) not in liste:
+            liste.append((fdc, self.port))
+        return liste
+
     def run(self) -> None:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -957,11 +977,12 @@ class Beacon(threading.Thread):
             return
         with sock:
             while self._laufen:
-                try:
-                    sock.sendto(self.text().encode("ascii", "replace"),
-                                ("255.255.255.255", self.port))
-                except OSError:
-                    pass
+                text = self.text().encode("ascii", "replace")
+                for ziel in self.ziele():
+                    try:
+                        sock.sendto(text, ziel)
+                    except OSError:
+                        pass
                 time.sleep(self.intervall)
 
     def stoppen(self) -> None:

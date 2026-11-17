@@ -1,7 +1,7 @@
 {
-  "version": "0.12.26",
+  "version": "0.12.27",
   "datum": "2026-11-18",
-  "hinweis": "Einrichtungs-AP bleibt stehen (die eigene AP-Adresse 192.168.4.1 galt als WLAN-Verbindung, der AP schaltete sich nach 30 s selbst ab), Verbindungsfehler landen im Journal und auf dem Panel, Portal-DNS fuer automatisches Oeffnen der Seite",
+  "hinweis": "Client meldet sich zusaetzlich per unicast beim FDC: er merkt sich die FDC-Adresse aus dessen Beacon (dauerhaft in /etc/fdc/fdc-server.json) und schickt sein IDENT dorthin - damit finden sich Client und FDC auch ueber VLAN-Grenzen, und eine DHCP-Aenderung der Client-IP heilt sich selbst",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -20,8 +20,8 @@
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "76276a80eb38ec0f167e0cb7453de35b7e15cc235ccb221a95d1686e27b5c2cb",
-      "bytes": 47502
+      "sha256": "822475ebe48a438ebbedd7fa1210439ea1572254c30dc92ed91965b9444273b1",
+      "bytes": 48457
     },
     {
       "pfad": "tools/panel_diag.py",
@@ -50,8 +50,8 @@
     },
     {
       "pfad": "tools/power_idle.py",
-      "sha256": "c8383a7c4abd7d9794a5dbdc7f0b087549794a191076ef85892880764530c9e5",
-      "bytes": 13029
+      "sha256": "902b31419838b27b540860a030f5c8824d7a453a6f0790357bb63a80195b0a2b",
+      "bytes": 14726
     },
     {
       "pfad": "tools/os_update.py",

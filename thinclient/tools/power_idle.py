@@ -163,6 +163,43 @@ def tick(jetzt: float, letztes_bild_ts: Optional[float],
     return ergebnis
 
 
+# ------------------------------------------------------ FDC-Adresse für Rücksendung
+#: bewusst unter /etc/fdc: /run ist nach dem Neustart leer, und ohne bekannte
+#: FDC-Adresse findet eine Box in einem fremden VLAN nicht zurueck (Broadcast
+#: bleibt im eigenen Netz).
+FDC_ADRESSE_DATEI = "/etc/fdc/fdc-server.json"
+
+
+def fdc_adresse_schreiben(adresse: str) -> None:
+    """Adresse des FDC merken (aus dem eingehenden Beacon)."""
+    adresse = str(adresse or "").strip()
+    if not adresse:
+        return
+    try:
+        ziel = Path(FDC_ADRESSE_DATEI)
+        inhalt = json.dumps({"ip": adresse, "seit": int(time.time())}) + "\n"
+        if ziel.exists() and ziel.read_text(encoding="utf-8") == inhalt:
+            return
+        ziel.write_text(inhalt, encoding="utf-8")
+        os.chmod(ziel, 0o644)          # der Agent laeuft als ssf und liest mit
+    except OSError:
+        pass
+
+
+def fdc_adresse_lesen(pfad: Optional[str] = None) -> str:
+    """Zuletzt bekannte FDC-Adresse (leer, wenn nie ein Beacon ankam).
+
+    ``pfad`` wird zur Laufzeit aufgeloest, nicht als Default gebunden: sonst
+    ignoriert die Funktion jede Aenderung an ``FDC_ADRESSE_DATEI`` (in Tests
+    und beim Umstellen des Ablageorts).
+    """
+    ziel = Path(pfad or FDC_ADRESSE_DATEI)
+    try:
+        return str(json.loads(ziel.read_text(encoding="utf-8")).get("ip") or "")
+    except (OSError, ValueError):
+        return ""
+
+
 # ------------------------------------------------------------------- Beacon-Lauscher
 class BeaconLauscher(threading.Thread):
     """Hoert auf den FDC-Beacon (UDP) und merkt sich den letzten Empfang."""
@@ -186,13 +223,17 @@ class BeaconLauscher(threading.Thread):
             return
         while self._laufen:
             try:
-                daten, _ = sock.recvfrom(1024)
+                daten, von = sock.recvfrom(1024)
             except (socket.timeout, OSError):
                 continue
             text = daten.decode("utf-8", "replace").strip()
             if text.upper().startswith("FDC"):
                 self.letzter = time.time()
                 self.text = text
+                # Absenderadresse merken: der Client schickt sein IDENT dann
+                # dorthin zurueck (unicast) — Broadcast bleibt im eigenen VLAN
+                # und erreicht ein FDC in einem anderen Netz nie.
+                fdc_adresse_schreiben(von[0] if von else "")
 
     def stoppen(self) -> None:
         self._laufen = False
