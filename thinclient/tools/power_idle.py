@@ -168,37 +168,57 @@ def tick(jetzt: float, letztes_bild_ts: Optional[float],
 #: FDC-Adresse findet eine Box in einem fremden VLAN nicht zurueck (Broadcast
 #: bleibt im eigenen Netz).
 FDC_ADRESSE_DATEI = "/etc/fdc/fdc-server.json"
+#: wie viele zuletzt gesehene FDC-Adressen gemerkt werden (Diagnose-Werkzeuge
+#: klopfen mit demselben Token an und wuerden sonst den echten FDC verdraengen)
+FDC_ADRESSEN_MAX = 4
 
 
-def fdc_adresse_schreiben(adresse: str) -> None:
-    """Adresse des FDC merken (aus dem eingehenden Beacon)."""
+def fdc_adresse_schreiben(adresse: str, pfad: Optional[str] = None) -> None:
+    """Adresse eines FDC merken (aus Beacon **oder** aus einer Anfrage mit Token).
+
+    Bewusst eine kleine Liste (neueste zuerst, max. ``FDC_ADRESSEN_MAX``):
+    wer mit gültigem Token anfragt, ist plausibel das FDC — aber während einer
+    Diagnose kann das auch ein anderes Werkzeug sein. Mit mehreren Zielen
+    verliert der Client den echten FDC nicht, und die neueste Adresse steht vorn.
+    """
     adresse = str(adresse or "").strip()
     if not adresse:
         return
+    ziel = Path(pfad or FDC_ADRESSE_DATEI)
+    liste = [adresse] + [a for a in fdc_adressen_lesen(pfad) if a != adresse]
+    daten = {"ips": liste[:FDC_ADRESSEN_MAX], "ip": adresse,
+             "seit": int(time.time())}
     try:
-        ziel = Path(FDC_ADRESSE_DATEI)
-        inhalt = json.dumps({"ip": adresse, "seit": int(time.time())}) + "\n"
-        if ziel.exists() and ziel.read_text(encoding="utf-8") == inhalt:
-            return
-        ziel.write_text(inhalt, encoding="utf-8")
+        ziel.parent.mkdir(parents=True, exist_ok=True)
+        ziel.write_text(json.dumps(daten) + "\n", encoding="utf-8")
         os.chmod(ziel, 0o644)          # der Agent laeuft als ssf und liest mit
     except OSError:
         pass
 
 
+def fdc_adressen_lesen(pfad: Optional[str] = None) -> list[str]:
+    """Alle bekannten FDC-Adressen, neueste zuerst (leer, wenn keine bekannt)."""
+    ziel = Path(pfad or FDC_ADRESSE_DATEI)
+    try:
+        daten = json.loads(ziel.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if isinstance(daten.get("ips"), list):
+        return [str(a) for a in daten["ips"] if a]
+    if daten.get("ip"):                  # ältere Ablage mit nur einer Adresse
+        return [str(daten["ip"])]
+    return []
+
+
 def fdc_adresse_lesen(pfad: Optional[str] = None) -> str:
-    """Zuletzt bekannte FDC-Adresse (leer, wenn nie ein Beacon ankam).
+    """Zuletzt bekannte FDC-Adresse (leer, wenn nie eine ankam).
 
     ``pfad`` wird zur Laufzeit aufgeloest, nicht als Default gebunden: sonst
     ignoriert die Funktion jede Aenderung an ``FDC_ADRESSE_DATEI`` (in Tests
     und beim Umstellen des Ablageorts).
     """
-    ziel = Path(pfad or FDC_ADRESSE_DATEI)
-    try:
-        return str(json.loads(ziel.read_text(encoding="utf-8")).get("ip") or "")
-    except (OSError, ValueError):
-        return ""
-
+    adressen = fdc_adressen_lesen(pfad)
+    return adressen[0] if adressen else ""
 
 # ------------------------------------------------------------------- Beacon-Lauscher
 class BeaconLauscher(threading.Thread):

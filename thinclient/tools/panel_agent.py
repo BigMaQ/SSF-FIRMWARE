@@ -672,6 +672,15 @@ def baue_handler(system: System, token: str, startzeit: float):
             if not token or self.headers.get("X-FDC-Token", "").strip() == token:
                 # Modulglobale lesen, damit Tests den Pfad ersetzen können
                 herzschlag_schreiben(HERZSCHLAG)
+                # Wer mit gültigem Token anfragt, IST das FDC — also seine
+                # Adresse merken. Der Client schickt sein IDENT dann dorthin
+                # (unicast) und bleibt auch nach VLAN-Wechsel oder DHCP sichtbar,
+                # ohne dass jemand im FDC ein Netz von Hand durchsuchen muss.
+                try:
+                    if power_idle is not None and getattr(self, "client_address", None):
+                        power_idle.fdc_adresse_schreiben(str(self.client_address[0]))
+                except Exception:                # noqa: BLE001 - Auth darf nie kippen
+                    pass
                 return True
             return False
 
@@ -958,14 +967,15 @@ class Beacon(threading.Thread):
         dem Absender, also ist auch ein DHCP-Wechsel erledigt.
         """
         liste: list[tuple[str, int]] = [("255.255.255.255", self.port)]
-        fdc = ""
+        bekannt: list[str] = []
         try:
             if power_idle is not None:
-                fdc = power_idle.fdc_adresse_lesen()
+                bekannt = power_idle.fdc_adressen_lesen()
         except Exception:                    # noqa: BLE001 - Beacon darf nie kippen
-            fdc = ""
-        if fdc and (fdc, self.port) not in liste:
-            liste.append((fdc, self.port))
+            bekannt = []
+        for fdc in bekannt:
+            if (fdc, self.port) not in liste:
+                liste.append((fdc, self.port))
         return liste
 
     def run(self) -> None:

@@ -1,7 +1,7 @@
 {
-  "version": "0.12.27",
+  "version": "0.12.28",
   "datum": "2026-11-18",
-  "hinweis": "Client meldet sich zusaetzlich per unicast beim FDC: er merkt sich die FDC-Adresse aus dessen Beacon (dauerhaft in /etc/fdc/fdc-server.json) und schickt sein IDENT dorthin - damit finden sich Client und FDC auch ueber VLAN-Grenzen, und eine DHCP-Aenderung der Client-IP heilt sich selbst",
+  "hinweis": "Client lernt die FDC-Adresse auch aus jeder Anfrage mit gueltigem Token (nicht nur aus dem Beacon) und merkt sich bis zu vier Adressen - damit registriert er sich nach dem ersten Anklopfen selbst, auch ueber VLAN-Grenzen und nach DHCP-Wechsel",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -20,8 +20,8 @@
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "822475ebe48a438ebbedd7fa1210439ea1572254c30dc92ed91965b9444273b1",
-      "bytes": 48457
+      "sha256": "fa59c88e4dfd8eea3a4c98c4ef05847eb5715fb529978c929502664657f74577",
+      "bytes": 49132
     },
     {
       "pfad": "tools/panel_diag.py",
@@ -50,8 +50,8 @@
     },
     {
       "pfad": "tools/power_idle.py",
-      "sha256": "902b31419838b27b540860a030f5c8824d7a453a6f0790357bb63a80195b0a2b",
-      "bytes": 14726
+      "sha256": "3028665a503f2fe7534aed49eb6a8f5700fbf50d1864506a74ac18a0894b214f",
+      "bytes": 15787
     },
     {
       "pfad": "tools/os_update.py",
