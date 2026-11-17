@@ -236,10 +236,15 @@ def layout_aus_geraet(geraet: dict, schirme: Optional[list] = None,
     Ein Panel je Monitor fuellt den Schirm, zwei teilen ihn halb (links/rechts).
     ``gedreht[i]`` baut Monitor *i* als gedrehte Leinwand (Hochformat-Panel,
     z. B. ECAM oben/unten) — sonst normale Fenster.
+
+    Beide Monitore werden **getrennt** behandelt: jeder rechnet mit seiner
+    eigenen Auflösung, und für jeden gedrehten Monitor entsteht eine eigene
+    Leinwand in ``leinwaende`` (nicht eine gemeinsame).
     """
     schirme = list(schirme or [])
     gedreht = list(gedreht or [])
     layout: dict[str, Any] = {"engine": engine, "panels": []}
+    leinwaende: list[dict] = []
     for index, monitor in enumerate(("monitor1", "monitor2")):
         eintraege = [e for e in (geraet.get(monitor) or []) if str(e.get("panel") or "").strip()]
         if not eintraege:
@@ -250,9 +255,8 @@ def layout_aus_geraet(geraet: dict, schirme: Optional[list] = None,
             # Gedrehte Leinwand: 1080x1920 bei 90° -> liegt quer auf 1920x1080.
             dreh = int((eintraege[0] or {}).get("rotate") or 90)
             canvas_w, canvas_h = hoehe, breite
-            if index == 0:
-                layout["canvas"] = {"width": canvas_w, "height": canvas_h,
-                                    "rotate": dreh, "screen": 0}
+            leinwaende.append({"screen": index, "width": canvas_w,
+                               "height": canvas_h, "rotate": dreh})
             teile = len(eintraege)
             teil_hoehe = canvas_h // teile
             for nummer, eintrag in enumerate(eintraege):
@@ -273,4 +277,12 @@ def layout_aus_geraet(geraet: dict, schirme: Optional[list] = None,
                 "width": teil_breite, "height": hoehe,
                 "fps": int(eintrag.get("fps") or fps),
             })
+    if leinwaende:
+        layout["leinwaende"] = leinwaende
+        layout["mode"] = "canvas"
+        # Erste Leinwand auch althergebracht als ``canvas`` (ältere Clients)
+        layout["canvas"] = {"width": leinwaende[0]["width"],
+                            "height": leinwaende[0]["height"],
+                            "rotate": leinwaende[0]["rotate"],
+                            "screen": leinwaende[0]["screen"]}
     return layout

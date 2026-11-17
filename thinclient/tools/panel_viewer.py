@@ -70,7 +70,8 @@ except ImportError:                      # als Skript gestartet
     from panel_diag import (DiagMonitor, abdunkeln, diag_splash_zeichnen,
                             diag_zeichnen, os_stand, ota_popup, ota_stand,
                             setup_hinweis, setup_zeichnen, splash_zeichnen,
-                            status_popup, unavail_zeichnen)
+                            problem_texte, status_popup,
+                            unavail_zeichnen, warnband_zeichnen)
     import panel_lang
     import panel_selfcheck
 
@@ -91,17 +92,37 @@ def fehlenden_schirm_merken(panel_id: str, schirm: int) -> None:
         FEHLENDE_SCHIRME.append(eintrag)
 
 
-def schirm_warnung(schirme_anzahl: int) -> str:
+def schirm_merker_leeren(panels) -> None:
+    """Alte Befunde für diese Panels verwerfen.
+
+    Sonst überlebt eine Meldung aus einem früheren Lauf, und nach dem
+    Umkonfigurieren steht ein Warnband für einen Schirm auf dem Glas, der längst
+    wieder da ist.  Es zählt nur, was das **aktuelle** Layout betrifft.
+    """
+    namen = {a.panel if hasattr(a, "panel") else str(a) for a in panels}
+    FEHLENDE_SCHIRME[:] = [e for e in FEHLENDE_SCHIRME
+                           if e.get("panel") not in namen]
+
+
+def schirm_warnung(schirme_anzahl: int, panels=None) -> str:
     """Ein Satz für das Warnband (deutsch; der Viewer übersetzt nicht).
 
     Wichtig: das Panel wird **nicht** angezeigt (nicht auf Schirm 1 geschoben) —
     der Text sagt das auch so, sonst sucht man es am falschen Ort.
+
+    ``panels`` grenzt ein, wen die Meldung betrifft: ein PFD-Fenster darf nicht
+    das Warnband der ECAM-Leinwand tragen (und umgekehrt).  Ohne ``panels`` gilt
+    alles Gemerkte.
     """
-    if not FEHLENDE_SCHIRME:
+    befunde = list(FEHLENDE_SCHIRME)
+    if panels is not None:
+        namen = {a if isinstance(a, str) else getattr(a, "panel", "") for a in panels}
+        befunde = [e for e in befunde if e.get("panel") in namen]
+    if not befunde:
         return ""
-    panel = FEHLENDE_SCHIRME[0]["panel"]
-    schirm = FEHLENDE_SCHIRME[0]["schirm"]
-    weitere = len(FEHLENDE_SCHIRME) - 1
+    panel = befunde[0]["panel"]
+    schirm = befunde[0]["schirm"]
+    weitere = len(befunde) - 1
     text = (f"Schirm {schirm + 1} fehlt (Gerät meldet {schirme_anzahl}) - "
             f"{panel} wird nicht angezeigt")
     if weitere:
@@ -338,7 +359,8 @@ class PanelFenster(DiagFensterMixin, QWidget):
                 texte = problem_texte(bericht, code)
                 # Fehlender Schirm zuerst: das erklärt, warum zwei Panels
                 # übereinander liegen — dringlicher als eine schiefe Uhr.
-                fehlt = schirm_warnung(len(QApplication.screens()))
+                fehlt = schirm_warnung(len(QApplication.screens()),
+                                        [self.panel_id])
                 if fehlt:
                     texte.insert(0, fehlt)
                 if texte:
@@ -565,6 +587,17 @@ class CanvasFenster(DiagFensterMixin, QWidget):
                 else:
                     punkt = QColor(255, 193, 7)
                 ota_popup(maler, QRectF(self.rect()), text, punkt)
+        # Geräteproblem oder fehlender Schirm: schmales Band, Bild bleibt
+        bericht = self.selbstauskunft()
+        texte = problem_texte(bericht, panel_lang.sprache()) if bericht else []
+        fehlt = schirm_warnung(len(QApplication.screens()), list(self.teile))
+        if fehlt:
+            texte.insert(0, fehlt)
+        if texte:
+            warnband_zeichnen(maler, QRectF(self.rect()), texte[0])
+        # Bildschirmschoner: liefert kein Teil mehr Bild, wird alles abgedimmt
+        self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
+                                   self.laengste_stille())
 
 
 class _Steuerung(QObject):
@@ -766,6 +799,10 @@ class Layout:
     rotate: float = 0.0
     #: Bildschirm für die Fläche (-1 = derselbe wie das erste Panel)
     canvas_screen: int = -1
+    #: Mehrere Leinwände — **eine je Schirm**: [{"screen", "width", "height",
+    #: "rotate"}].  Der alte Einzel-Fall (``canvas`` + ``canvas_screen``) bleibt
+    #: gültig und wird wie eine Leinwand behandelt.
+    leinwaende: list = field(default_factory=list)
 
 
 def _rect(text: str) -> tuple[int, int, int, int]:
@@ -789,6 +826,19 @@ def layout_aus_datei(pfad: str) -> Layout:
         roh = json.load(datei)
     host, port = _engine(str(roh.get("engine") or "127.0.0.1:8787"))
     flaeche = roh.get("canvas") or {}
+    leinwaende: list = []
+    for eintrag in (roh.get("leinwaende") or []):
+        if not isinstance(eintrag, dict):
+            continue
+        try:
+            rahmen = {"screen": int(eintrag.get("screen") or 0),
+                      "width": int(eintrag.get("width") or 0),
+                      "height": int(eintrag.get("height") or 0),
+                      "rotate": float(eintrag.get("rotate") or 0.0)}
+        except (TypeError, ValueError):
+            continue
+        if rahmen["width"] > 0 and rahmen["height"] > 0:
+            leinwaende.append(rahmen)
     layout = Layout(engine_host=host, engine_port=port,
                     vollbild=bool(roh.get("vollbild", True)),
                     debug=bool(roh.get("debug", False)),
@@ -796,7 +846,8 @@ def layout_aus_datei(pfad: str) -> Layout:
                     canvas_w=int(flaeche.get("width") or 0),
                     canvas_h=int(flaeche.get("height") or 0),
                     rotate=float(flaeche.get("rotate") or 0.0),
-                    canvas_screen=int(flaeche.get("screen", -1)))
+                    canvas_screen=int(flaeche.get("screen", -1)),
+                    leinwaende=leinwaende)
     for eintrag in roh.get("panels") or []:
         layout.panels.append(PanelAuftrag(
             panel=str(eintrag["panel"]),
@@ -912,56 +963,77 @@ def bild_merken(panel: str = "") -> None:
 
 
 def _leinwand_bauen(layout: Layout, steuerung: _Steuerung, schirme,
-                    monitor: Optional[DiagMonitor]) -> Optional["CanvasFenster"]:
-    """Ein Fenster, viele Panels, optional gedreht (ECAM-Monitor 45°).
+                    monitor: Optional[DiagMonitor]) -> list["CanvasFenster"]:
+    """Leinwände bauen — **eine je Schirm**.
 
-    Läuft zusätzlich zu den Einzelfenstern: PFD/ND auf Schirm 0, die
-    ECAM-Leinwand auf Schirm 1 — beides aus derselben Layout-Datei.
+    Gedacht für den ECAM-Monitor, der 45° schief im Panel sitzt: eine Fläche
+    trägt mehrere Panels, wird als Ganzes gedreht und eingepasst.  Zwei Monitore
+    heißen zwei Leinwände (``leinwaende``), jede mit eigener Größe und Drehung;
+    der alte Einzel-Fall (``canvas`` + ``screen``) bleibt gültig.
+
+    Ein Schirm, den das Gerät nicht meldet, bekommt **keine** Leinwand: nichts
+    anzeigen ist besser, als die Panels auf Schirm 1 zu überdecken.
     """
     teile = [a for a in layout.panels if a.auf_leinwand]
+    schirm_merker_leeren(teile)          # nur die eigenen Panels
     if not teile:
-        return None
-    gewuenscht = layout.canvas_screen
-    if gewuenscht >= 0 and gewuenscht >= len(schirme):
-        # NICHT auf Schirm 0 ausweichen: das würde die PFD/ND-Fenster überdecken.
-        # Aber merken — sonst fehlt die ECAM-Anzeige ohne jede Erklärung.
-        for auftrag in teile:
-            fehlenden_schirm_merken(auftrag.panel, gewuenscht)
-        print(f"[viewer] Schirm {gewuenscht} gibt es nicht "
-              f"({len(schirme)} vorhanden) — Leinwand übersprungen", flush=True)
-        return None
-    idx = gewuenscht if gewuenscht >= 0 else 0
-    geo = schirme[idx].geometry() if schirme else None
-    breite = geo.width() if geo else 1920
-    hoehe = geo.height() if geo else 1080
-    canvas = CanvasFenster((geo.x(), geo.y(), breite, hoehe) if geo else (0, 0, breite, hoehe),
-                           layout.canvas_w or breite, layout.canvas_h or hoehe,
-                           rotate=layout.rotate, vollbild=layout.vollbild,
-                           debug=layout.debug, monitor=monitor)
-    standard_hoehe = (layout.canvas_h or hoehe) // max(1, len(teile))
-    for auftrag in teile:
-        rect = (auftrag.offset_x, auftrag.offset_y,
-                auftrag.width or (layout.canvas_w or breite),
-                auftrag.height or standard_hoehe)
-        canvas.teil_anlegen(auftrag.panel, rect, scale=auftrag.scale,
-                            diag=auftrag.diag, zoom=auftrag.zoom)
-    for auftrag in teile:
-        if auftrag.test:
-            canvas._testbetrieb = True
+        return []
+
+    flaechen = list(layout.leinwaende or [])
+    if not flaechen:
+        flaechen = [{"screen": layout.canvas_screen if layout.canvas_screen >= 0 else 0,
+                     "width": layout.canvas_w, "height": layout.canvas_h,
+                     "rotate": layout.rotate}]
+
+    gebaut: list["CanvasFenster"] = []
+    for flaeche in flaechen:
+        schirm_idx = int(flaeche.get("screen") or 0)
+        meine = [a for a in teile if a.screen == schirm_idx]
+        if not meine:
             continue
-        cfg = StreamConfig(slug=auftrag.panel, panel_id=auftrag.panel,
-                           width=auftrag.width or 768, height=auftrag.height or 768,
-                           fps=float(auftrag.fps), source="glassout",
-                           engine_host=layout.engine_host,
-                           engine_port=layout.engine_port,
-                           engine_fps=auftrag.engine_fps, crop=auftrag.crop,
-                           crop_remote=True)
-        steuerung.anbauen_canvas(cfg, canvas)
-    canvas.show()
-    print(f"[viewer] Leinwand {canvas.canvas_w}x{canvas.canvas_h} "
-          f"gedreht {canvas.rotate:g}° auf Schirm {idx} ({breite}x{hoehe}) mit "
-          f"{len(teile)} Teil(en): {', '.join(a.panel for a in teile)}", flush=True)
-    return canvas
+        if schirme and not (0 <= schirm_idx < len(schirme)):
+            for auftrag in meine:
+                fehlenden_schirm_merken(auftrag.panel, schirm_idx)
+            print(f"[viewer] Schirm {schirm_idx + 1} gibt es nicht "
+                  f"({len(schirme)} vorhanden) - Leinwand bleibt aus "
+                  f"({', '.join(a.panel for a in meine)})", flush=True)
+            continue
+        idx = schirm_idx if 0 <= schirm_idx < len(schirme) else 0
+        geo = schirme[idx].geometry() if schirme else None
+        breite = geo.width() if geo else 1920
+        hoehe = geo.height() if geo else 1080
+        canvas_w = int(flaeche.get("width") or 0) or breite
+        canvas_h = int(flaeche.get("height") or 0) or hoehe
+        canvas = CanvasFenster(
+            (geo.x(), geo.y(), breite, hoehe) if geo else (0, 0, breite, hoehe),
+            canvas_w, canvas_h, rotate=float(flaeche.get("rotate") or 0.0),
+            vollbild=layout.vollbild, debug=layout.debug, monitor=monitor)
+        standard_hoehe = canvas_h // max(1, len(meine))
+        for auftrag in meine:
+            rect = (auftrag.offset_x, auftrag.offset_y,
+                    auftrag.width or canvas_w,
+                    auftrag.height or standard_hoehe)
+            canvas.teil_anlegen(auftrag.panel, rect, scale=auftrag.scale,
+                                diag=auftrag.diag, zoom=auftrag.zoom)
+        for auftrag in meine:
+            if auftrag.test:
+                canvas._testbetrieb = True
+                continue
+            cfg = StreamConfig(slug=auftrag.panel, panel_id=auftrag.panel,
+                               width=auftrag.width or 768, height=auftrag.height or 768,
+                               fps=float(auftrag.fps), source="glassout",
+                               engine_host=layout.engine_host,
+                               engine_port=layout.engine_port,
+                               engine_fps=auftrag.engine_fps, crop=auftrag.crop,
+                               crop_remote=True)
+            steuerung.anbauen_canvas(cfg, canvas)
+        canvas.show()
+        print(f"[viewer] Leinwand Schirm {schirm_idx + 1} {canvas_w}x{canvas_h} "
+              f"gedreht {float(flaeche.get('rotate') or 0.0):g}° mit "
+              f"{len(meine)} Teil(en): {', '.join(a.panel for a in meine)}",
+              flush=True)
+        gebaut.append(canvas)
+    return gebaut
 
 
 def eigene_ip() -> str:
@@ -987,12 +1059,15 @@ class SetupFenster(QWidget):
     Panel im FDC einrichten" in der Sprache des FDC (Default Englisch).
     """
 
-    def __init__(self, adresse: str = "") -> None:
+    def __init__(self, adresse: str = "", meldung: str = "") -> None:
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setStyleSheet("background:#000;")
         self.setCursor(Qt.BlankCursor)
         self.adresse = adresse
+        #: Grund, warum nichts angezeigt wird (z. B. fehlender Schirm) — dann
+        #: NICHT „bitte einrichten" behaupten, sondern den echten Grund nennen.
+        self.meldung = meldung
         self._letzte_sprache = ""
         # Ohne Neuzeichnen bliebe ein Wechsel der Sprache unsichtbar
         self._timer = QTimer(self)
@@ -1016,17 +1091,14 @@ class SetupFenster(QWidget):
                          else QColor(61, 220, 132) if "fertig" in text
                          or "installiert" in text else QColor(255, 193, 7))
                 ota_popup(maler, QRectF(self.rect()), text, punkt)
-            # Fehlender Schirm / Geräteproblem: schmales Band, Bild bleibt
-            bericht = self.selbstauskunft()
-            texte = problem_texte(bericht, panel_lang.sprache()) if bericht else []
-            fehlt = schirm_warnung(len(QApplication.screens()))
-            if fehlt:
-                texte.insert(0, fehlt)
-            if texte:
-                warnband_zeichnen(maler, QRectF(self.rect()), texte[0])
-            # Bildschirmschoner: liefert kein Teil mehr Bild, wird alles abgedimmt
-            self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
-                                       self.laengste_stille())
+            # Steht ein Grund an, warum nichts angezeigt wird (fehlender
+            # Schirm), gehört der auf den Schirm — „bitte einrichten" wäre
+            # schlicht falsch.  Keine Selbstauskunft, kein Dimmen: dieser
+            # Hinweis hat keine Panels, er *ist* die Anzeige.
+            grund = getattr(self, "meldung", "") or schirm_warnung(
+                len(QApplication.screens()))
+            if grund:
+                warnband_zeichnen(maler, QRectF(self.rect()), grund)
         finally:
             maler.end()
 
@@ -1040,8 +1112,10 @@ def fenster_bauen(layout: "Layout", schirme, monitor=None, steuerung=None):
     übereinanderzulegen.  Gemerkt wird es trotzdem (`FEHLENDE_SCHIRME`), damit
     der Betreiber am Bildschirm sieht, warum etwas fehlt.
     """
+    fenster_teile = [a for a in layout.panels if not a.auf_leinwand]
+    schirm_merker_leeren(fenster_teile)  # nur die eigenen Panels
     gebaut: list = []
-    for auftrag in (a for a in layout.panels if not a.auf_leinwand):
+    for auftrag in fenster_teile:
         if schirme and not (0 <= auftrag.screen < len(schirme)):
             fehlenden_schirm_merken(auftrag.panel, auftrag.screen)
             print(f"[viewer] Schirm {auftrag.screen + 1} gibt es nicht "
@@ -1096,16 +1170,21 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"{rect[0]},{rect[1]} {rect[2]}x{rect[3]} pos={auftrag.position} "
               f"scale={auftrag.scale} @ {auftrag.fps} fps "
               f"von {layout.engine_host}:{layout.engine_port}", flush=True)
-    leinwand = _leinwand_bauen(layout, steuerung, schirme, monitor)
-    if not fenster and leinwand is None:
-        # Frisch installiert oder noch nichts zugeordnet: Hinweis zeigen statt
-        # schwarzem Schirm — der Agent bleibt erreichbar, das FDC kann
-        # zuordnen, und danach startet der Dienst mit Bild neu.
-        splash = SetupFenster(adresse=eigene_ip())
+    leinwaende_gebaut = _leinwand_bauen(layout, steuerung, schirme, monitor)
+    if not fenster and not leinwaende_gebaut:
+        # Nichts zu zeigen.  Zwei sehr verschiedene Fälle:
+        #  * wirklich nichts eingerichtet -> Einrichtungs-Hinweis
+        #  * Panels sind eingerichtet, aber ihr Schirm fehlt -> NICHT „bitte
+        #    einrichten" behaupten, sondern sagen, welcher Schirm fehlt.
+        eingerichtet = bool(layout.panels)
+        meldung = schirm_warnung(len(schirme)) if eingerichtet else ""
+        splash = SetupFenster(adresse=eigene_ip(), meldung=meldung)
         if schirme:
             splash.setGeometry(schirme[0].geometry())
         splash.showFullScreen()
-        print("[viewer] kein Panel eingerichtet — Einrichtungs-Hinweis aktiv",
+        print("[viewer] " + ("Panel-Schirm fehlt — Hinweis aktiv"
+                             if eingerichtet else
+                             "kein Panel eingerichtet — Einrichtungs-Hinweis aktiv"),
               flush=True)
     # Sauber beenden, damit die Netz-Threads nicht hängen bleiben
     app.aboutToQuit.connect(steuerung.stop)

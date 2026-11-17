@@ -183,6 +183,29 @@ def pruefe_layout(daten) -> dict:
                             "rotate": drehung, "screen": schirm}
     if not sauber["engine"]:
         raise ValueError("'engine' fehlt (Host:Port der GlassOut-Engine)")
+    # Mehrere Leinwände (eine je Schirm) — muss durchgereicht werden, sonst
+    # schluckt der Agent die Zuordnung still.
+    leinwaende = []
+    for eintrag in (daten.get("leinwaende") or []):
+        if not isinstance(eintrag, dict):
+            raise ValueError("'leinwaende': jeder Eintrag muss ein Objekt sein")
+        try:
+            schirm = int(eintrag.get("screen") or 0)
+            breite = int(eintrag.get("width") or 0)
+            hoehe = int(eintrag.get("height") or 0)
+            drehung = float(eintrag.get("rotate") or 0.0)
+        except (TypeError, ValueError):
+            raise ValueError("'leinwaende': screen/width/height/rotate müssen Zahlen sein")
+        if not (0 <= schirm <= 1):
+            raise ValueError("'leinwaende': screen muss 0 oder 1 sein")
+        if not (0 < breite <= 16384) or not (0 < hoehe <= 16384):
+            raise ValueError("'leinwaende': width/height müssen 1 … 16384 sein")
+        if not (-360.0 <= drehung <= 360.0):
+            raise ValueError("'leinwaende': rotate muss -360 … 360 sein")
+        leinwaende.append({"screen": schirm, "width": breite,
+                           "height": hoehe, "rotate": drehung})
+    if leinwaende:
+        sauber["leinwaende"] = leinwaende
     gesehen = set()
     for eintrag in panels:
         if not isinstance(eintrag, dict):
