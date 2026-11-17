@@ -246,6 +246,187 @@ def unavail_zeichnen(maler: QPainter, flaeche, panel_id: str,
                    Qt.AlignCenter, text)
 
 
+def diag_splash_zeichnen(maler: QPainter, flaeche, bericht, sprache_code: str = "en") -> None:
+    """Fehlerbild „Panel - Diag" — was der Client selbst über sich weiß.
+
+    Ohne SSH und ohne Tastatur ist der Bildschirm die einzige Auskunft.  Die
+    Zeilen kommen fertig aus ``panel_selfcheck.bericht()``; die Beschriftungen
+    werden übersetzt, damit die Anzeige derselben Sprache folgt wie das Panel.
+    """
+    try:
+        from tools import panel_lang as pl
+    except ImportError:
+        import panel_lang as pl
+
+    x0 = flaeche.x() if hasattr(flaeche, "x") else 0.0
+    y0 = flaeche.y() if hasattr(flaeche, "y") else 0.0
+    breite = flaeche.width()
+    hoehe = flaeche.height()
+    maler.fillRect(QRectF(x0, y0, breite, hoehe), QColor(8, 8, 10))
+
+    zeilen = list(getattr(bericht, "zeilen", []) or [])
+    status = str(getattr(bericht, "status", "fehler")).upper()
+    probleme = problem_texte(bericht, sprache_code)
+
+    grosse = max(12, int(min(breite * 0.040, hoehe * 0.055)))
+    klein = max(9, int(grosse * 0.62))
+    rand = int(min(breite, hoehe) * 0.045)
+
+    # Kopf: TITEL + Status
+    titel = pl.text("diag_titel", sprache_code)
+    farbe_status = {"FEHLER": QColor(235, 70, 70),
+                    "WARNUNG": QColor(235, 190, 60)}.get(status, QColor(80, 220, 140))
+    maler.setFont(QFont("DejaVu Sans", int(grosse * 1.15), QFont.Bold))
+    maler.setPen(QColor(230, 230, 235))
+    maler.drawText(QRectF(x0 + rand, y0 + rand, breite - 2 * rand, grosse * 1.6),
+                   Qt.AlignLeft | Qt.AlignVCenter, titel)
+    status_text = pl.text("status_" + status.lower(), sprache_code)
+    maler.setPen(farbe_status)
+    maler.drawText(QRectF(x0 + rand, y0 + rand, breite - 2 * rand, grosse * 1.6),
+                   Qt.AlignRight | Qt.AlignVCenter, status_text)
+
+    # Trennlinie
+    y = y0 + rand + grosse * 2.0
+    maler.setPen(QColor(60, 60, 70))
+    maler.drawLine(int(x0 + rand), int(y), int(x0 + breite - rand), int(y))
+    y += grosse * 0.6
+
+    # Schlüssel/Wert-Tabelle, Schrift wird an die längste Zeile angepasst
+    werte = [(pl.text("diag_" + _diag_schluessel(k), sprache_code),
+              _wert_text(wert, sprache_code))
+             for k, wert in zeilen]
+    # Zeilenhöhe so wählen, dass ALLE Zeilen Platz haben — eine Tafel, die die
+    # entscheidenden Zeilen (Rechte, Uhr) abschneidet, ist wertlos.
+    fuss = klein * 2.0
+    verfuegbar = max(1.0, (y0 + hoehe - rand - fuss) - y)
+    anzahl = max(1, len(werte))
+    zeilen_hoehe = int(min(grosse * 1.45, verfuegbar / anzahl))
+    klein = max(8, min(klein, int(zeilen_hoehe * 0.66)))
+    spalte_links = breite * 0.40
+    spalte_rechts = breite * 0.55
+    for schluessel, wert in werte:
+        maler.setFont(QFont("DejaVu Sans", klein))
+        masse = maler.fontMetrics()
+        maler.setPen(QColor(150, 160, 175))
+        maler.drawText(QRectF(x0 + rand, y, spalte_links, zeilen_hoehe),
+                       Qt.AlignLeft | Qt.AlignVCenter,
+                       masse.elidedText(schluessel, Qt.ElideRight, int(spalte_links - 6)))
+        maler.setPen(_wert_farbe(wert))
+        maler.drawText(QRectF(x0 + rand + spalte_links, y, spalte_rechts, zeilen_hoehe),
+                       Qt.AlignLeft | Qt.AlignVCenter,
+                       masse.elidedText(wert, Qt.ElideRight, int(spalte_rechts - 6)))
+        y += zeilen_hoehe
+
+    # Fuß: erste Meldung + Hinweis
+    if probleme:
+        maler.setFont(QFont("DejaVu Sans", klein))
+        maler.setPen(QColor(240, 200, 90))
+        maler.drawText(QRectF(x0 + rand, y0 + hoehe - rand - zeilen_hoehe,
+                              breite - 2 * rand, zeilen_hoehe),
+                       Qt.AlignLeft | Qt.AlignVCenter, probleme[0][:120])
+    maler.setFont(QFont("DejaVu Sans", max(8, int(klein * 0.85))))
+    maler.setPen(QColor(110, 115, 125))
+    maler.drawText(QRectF(x0 + rand, y0 + hoehe - rand - zeilen_hoehe,
+                          breite - 2 * rand, zeilen_hoehe),
+                   Qt.AlignRight | Qt.AlignVCenter,
+                   pl.text("diag_hinweis", sprache_code))
+
+
+def problem_texte(bericht, sprache_code: str = "en") -> list[str]:
+    """Problemzeilen in der Sprache der Anlage (Code → Satz)."""
+    try:
+        from tools import panel_lang as pl
+    except ImportError:
+        import panel_lang as pl
+
+    codes = list(getattr(bericht, "codes", None) or [])
+    if not codes:                        # alter Bericht ohne Codes
+        return list(getattr(bericht, "probleme", None) or [])
+    texte = []
+    for code, werte in codes:
+        try:
+            texte.append(pl.text("prob_" + str(code), sprache_code, **(werte or {})))
+        except Exception:                # noqa: BLE001 - Anzeige darf nie kippen
+            texte.append(str(code))
+    return texte
+
+
+def _wert_text(wert, sprache_code: str = "en") -> str:
+    """Tabellenwert in die Sprache der Anlage bringen.
+
+    ``panel_selfcheck`` liefert neutrale Tokens (``ok``, ``error``,
+    ``missing:websocket``, ``stale:120``) — nur so kann dieselbe Zeile in vier
+    Sprachen erscheinen.  Alles, was kein Token ist (IP, Version, Datum), geht
+    unverändert durch.
+    """
+    try:
+        from tools import panel_lang as pl
+    except ImportError:
+        import panel_lang as pl
+
+    text = str(wert if wert is not None else "")
+    if text.startswith("missing:"):
+        return pl.text("diag_wert_missing", sprache_code, liste=text.split(":", 1)[1])
+    if text.startswith("stale:"):
+        return pl.text("diag_wert_stale", sprache_code, sekunden=text.split(":", 1)[1])
+    if text in ("ok", "error", "complete", "connected", "no_fdc", "yes", "no", "none"):
+        return pl.text("diag_wert_" + text, sprache_code)
+    return text
+
+
+def _wert_farbe(wert) -> QColor:
+    """Nur echte Probleme rot — sonst ist die ganze Tafel rot und sagt nichts."""
+    text = str(wert or "").strip()
+    if text in ("error", "no_fdc", "none", "no") or text.startswith(("missing:", "stale:")):
+        return QColor(250, 110, 110)
+    if text in ("ok", "complete", "connected", "yes"):
+        return QColor(120, 220, 150)
+    return QColor(220, 225, 230)
+
+
+def _diag_schluessel(name: str) -> str:
+    """``Stream Active`` → ``stream_active`` (Schlüssel in panel_lang)."""
+    return (str(name).strip().lower().replace(" ", "_")
+            .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue"))
+
+
+def warnband_zeichnen(maler: QPainter, flaeche, text: str) -> None:
+    """Schmales Band am unteren Rand, solange das Bild läuft aber etwas klemmt.
+
+    Ein unplausible Uhr oder fehlende Schreibrechte sind keine Sichtfehler — das
+    Panel soll weiter Instrumente zeigen.  Ganz ignorieren darf man es aber
+    auch nicht, sonst steht man beim Update-Rätselraten wieder im Dunkeln.
+    """
+    if not text:
+        return
+    x0 = flaeche.x() if hasattr(flaeche, "x") else 0.0
+    y0 = flaeche.y() if hasattr(flaeche, "y") else 0.0
+    breite, hoehe = flaeche.width(), flaeche.height()
+    band = max(18.0, hoehe * 0.045)
+    oben = y0 + hoehe - band
+    maler.fillRect(QRectF(x0, oben, breite, band), QColor(20, 16, 6, 210))
+    maler.setPen(QColor(235, 190, 60))
+    maler.setFont(QFont("DejaVu Sans", max(8, int(band * 0.52))))
+    maler.drawText(QRectF(x0 + band * 0.3, oben, breite - band * 0.6, band),
+                   Qt.AlignLeft | Qt.AlignVCenter,
+                   text if len(text) <= 110 else text[:107] + "...")
+
+
+def abdunkeln(maler: QPainter, flaeche, staerke: int = 190) -> None:
+    """Bildschirmschoner: alles abdimmen, ohne den Text unlesbar zu machen.
+
+    Wird über die ganze Fläche gelegt, wenn lange kein Bild mehr kam.  ``staerke``
+    ist das Alpha der schwarzen Lage (0 = aus, 255 = komplett schwarz).
+    """
+    wert = max(0, min(255, int(staerke)))
+    if wert == 0:
+        return
+    x0 = flaeche.x() if hasattr(flaeche, "x") else 0.0
+    y0 = flaeche.y() if hasattr(flaeche, "y") else 0.0
+    maler.fillRect(QRectF(x0, y0, flaeche.width(), flaeche.height()),
+                   QColor(0, 0, 0, wert))
+
+
 def splash_zeichnen(maler: QPainter, flaeche, sprache_code: str = "en",
                     adresse: str = "") -> None:
     """Startbild ohne Konfiguration: „Panel im FDC einrichten".

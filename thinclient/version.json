@@ -1,7 +1,7 @@
 {
-  "version": "0.12.13",
+  "version": "0.12.14",
   "datum": "2026-11-17",
-  "hinweis": "SYSTEMS UNAVAIL blankt das Panel (kein Standbild mehr), Absturzspur fuer Python-Ausnahmen, Klick auf Herunterfahren kann die GUI nicht mehr mitnehmen",
+  "hinweis": "Bildschirmschoner bei kein Bild (abdunkeln), Diag-Tafel mit IP/Netz/Verbindung/Version/Rechten/Uhr bei Geraetefehlern, 4-sprachig, Build-Datum im Abbild gegen unplausible Uhr",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "2da9e1db6c176a4c3898ab636a61b3c44daca572053519b5121d2c1797bb749c",
-      "bytes": 44475
+      "sha256": "d82c8da155d7f5d6a28c4aecad8a3744ceda901fe3070702e87854ccceb8f87f",
+      "bytes": 47598
     },
     {
       "pfad": "tools/panel_agent.py",
@@ -25,8 +25,8 @@
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "ca6d714061e7afe5817040e6d44955474d0e00b08b04a7ab20a31175a8a0f261",
-      "bytes": 23116
+      "sha256": "639daa2a4e8fedef4ab07d369a0852624b4db93906ce5f9294addef4d46cfde9",
+      "bytes": 31116
     },
     {
       "pfad": "tools/panel_grab.py",
@@ -60,8 +60,13 @@
     },
     {
       "pfad": "tools/panel_lang.py",
-      "sha256": "243119800da7f2c07defb26edb1bb7e96e86e4c67390a705e11f5fb7feff98f4",
-      "bytes": 9557
+      "sha256": "d2eab274c5121b5d1ecbe3a7d4e142017f7cc9ec27576b5a4e9c4f80313fb22d",
+      "bytes": 15863
+    },
+    {
+      "pfad": "tools/panel_selfcheck.py",
+      "sha256": "83cea2cfe1163cbc754b9104e3c7dd0c12b332ef7a0e3c264a7a2cbb49bdd7a0",
+      "bytes": 15336
     },
     {
       "pfad": "wait-for-x.sh",

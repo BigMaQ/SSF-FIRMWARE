@@ -60,16 +60,19 @@ from PySide6.QtGui import QImage, QPainter, QPen, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 try:                                     # als Paket (Tests)
-    from tools.panel_diag import (DiagMonitor, diag_zeichnen, os_stand,
-                                  ota_popup, ota_stand, setup_hinweis,
-                                  setup_zeichnen, splash_zeichnen, status_popup,
-                                  unavail_zeichnen)
-    from tools import panel_lang
+    from tools.panel_diag import (DiagMonitor, abdunkeln, diag_splash_zeichnen,
+                                  diag_zeichnen, os_stand, ota_popup, ota_stand,
+                                  setup_hinweis, setup_zeichnen, splash_zeichnen,
+                                  problem_texte, status_popup,
+                                  unavail_zeichnen, warnband_zeichnen)
+    from tools import panel_lang, panel_selfcheck
 except ImportError:                      # als Skript gestartet
-    from panel_diag import (DiagMonitor, diag_zeichnen, os_stand, ota_popup,
-                            ota_stand, setup_hinweis, setup_zeichnen,
-                            splash_zeichnen, status_popup, unavail_zeichnen)
+    from panel_diag import (DiagMonitor, abdunkeln, diag_splash_zeichnen,
+                            diag_zeichnen, os_stand, ota_popup, ota_stand,
+                            setup_hinweis, setup_zeichnen, splash_zeichnen,
+                            status_popup, unavail_zeichnen)
     import panel_lang
+    import panel_selfcheck
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,14 @@ class PanelFenster(QWidget):
         self._letzter_frame = 0.0
         #: Im Testbetrieb kommt kein Netzwerkbild - dann auch keine Wartemeldung
         self._testbetrieb = False
+        # Bildschirmschoner bei „kein Bild": nach dieser Zeit wird alles
+        # abgedimmt.  Über die Umgebung abschaltbar (0 = nie).
+        self._dim_nach = float(os.environ.get("FDC_DIM_NACH", "45") or 45)
+        self._dim_staerke = int(os.environ.get("FDC_DIM_ALPHA", "190") or 190)
+        #: Selbstauskunft (Diag-Splash) — höchstens alle 15 s neu erheben,
+        #: weil sie Dateien liest und nmcli befragt.
+        self._bericht: Optional[object] = None
+        self._bericht_stand = 0.0
         # Ohne Tastatur/Maus am Client ist eine stumme schwarze Fläche ein
         # Blindflug: der Timer lässt die Wartemeldung auch dann erscheinen,
         # wenn gar keine Frames mehr kommen (und nichts ein Neuzeichnen auslöst).
@@ -163,6 +174,31 @@ class PanelFenster(QWidget):
     def _kein_bild_sekunden(self) -> float:
         return (time.monotonic() - self._letzter_frame) if self._letzter_frame else 0.0
 
+    def selbstauskunft(self):
+        """Diag-Bericht des Geräts — höchstens alle 15 s neu erhoben.
+
+        ``nmcli`` und Dateizugriffe im Sekundentakt wären Verschwendung; und im
+        Fehlerfall ist ein 15 s alter Befund genauso aussagekräftig.
+        """
+        jetzt = time.monotonic()
+        if self._bericht is not None and (jetzt - self._bericht_stand) < 15.0:
+            return self._bericht
+        try:
+            self._bericht = panel_selfcheck.laufender_bericht(
+                stream_aktiv=bool(self._pixmap is not None and not self._pixmap.isNull()
+                                  and self._kein_bild_sekunden() < 5.0))
+        except Exception:                        # noqa: BLE001 - Diagnose darf nie kippen
+            self._bericht = None
+        self._bericht_stand = jetzt
+        return self._bericht
+
+    def dimmen(self, maler: QPainter) -> None:
+        """Bildschirmschoner: bei langer Bildlosigkeit alles abdimmen."""
+        if self._dim_nach <= 0 or self._dim_staerke <= 0:
+            return
+        if self._kein_bild_sekunden() >= self._dim_nach:
+            abdunkeln(maler, QRectF(self.rect()), self._dim_staerke)
+
     def zielrechteck(self) -> tuple[float, float, float, float]:
         """Wohin das Bild gezeichnet wird (x, y, w, h) im Fenster."""
         if self._pixmap is None or self._pixmap.isNull():
@@ -208,15 +244,36 @@ class PanelFenster(QWidget):
                            str(hinweis.get("ssid") or ""),
                            str(hinweis.get("url") or ""))
         elif meldung:
-            code = panel_lang.sprache()
-            unavail_zeichnen(maler, QRectF(self.rect()), self.panel_id,
-                             self._kein_bild_sekunden(),
-                             detail=panel_lang.text("keine_daten", code,
-                                                    panel=self.panel_id),
-                             titel=panel_lang.text("unavail", code))
+            # Erst prüfen, ob am Gerät selbst etwas kaputt ist (fehlendes Modul,
+            # kein Schreibrecht, unplausible Uhr): dann zeigt der Bildschirm die
+            # Diag-Tafel statt der knappen Meldung — ohne SSH ist das die
+            # einzige Auskunft, die der Betreiber vor Ort bekommt.
+            bericht = self.selbstauskunft()
+            if bericht is not None and getattr(bericht, "fehler", False):
+                diag_splash_zeichnen(maler, QRectF(self.rect()), bericht,
+                                     panel_lang.sprache())
+            else:
+                code = panel_lang.sprache()
+                unavail_zeichnen(maler, QRectF(self.rect()), self.panel_id,
+                                 self._kein_bild_sekunden(),
+                                 detail=panel_lang.text("keine_daten", code,
+                                                        panel=self.panel_id),
+                                 titel=panel_lang.text("unavail", code))
+                self.dimmen(maler)
         elif self.diag and self.monitor is not None:
             diag_zeichnen(maler, QRectF(self.rect()), self.monitor.werte(),
                           fps=len(self._fps_fenster) / 2.0)
+        if not meldung and not hinweis:
+            # Bild läuft, aber am Gerät klemmt etwas (Uhr, Rechte, Module):
+            # schmales Band, damit man es sieht ohne das Panel zu verdecken.
+            bericht = self.selbstauskunft()
+            if bericht is not None:
+                code = panel_lang.sprache()
+                texte = problem_texte(bericht, code)
+                if texte:
+                    warnband_zeichnen(maler, QRectF(self.rect()),
+                                      panel_lang.text("diag_warnband", code,
+                                                      text=texte[0]))
         if not self._testbetrieb and not hinweis:
             # Update-Hinweis klein in die Ecke: es soll nicht wie eine Störung
             # des Panels aussehen, aber ohne Hinweis merkt niemand davon.
