@@ -1,7 +1,7 @@
 {
-  "version": "0.12.23",
+  "version": "0.12.24",
   "datum": "2026-11-17",
-  "hinweis": "Einrichtungs-AP mit drei Anlaeufen + Hotspot-Fallback (Karten lehnen einzelne nmcli-Eigenschaften ab), Grund fuer gescheiterten AP steht auf dem Panel, kein Auto-Poweroff waehrend der Einrichtung oder ohne Uplink",
+  "hinweis": "Einrichtungs-AP kommt jetzt wirklich hoch: offener AP ohne wifi-sec-Block (key-mgmt none liess NetworkManager WEP-Schluessel verlangen), Netzliste bleibt bei Neustart erhalten",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -35,8 +35,8 @@
     },
     {
       "pfad": "tools/wlan_setup.py",
-      "sha256": "4c0963195d21fa7b8e9600d2236bd72430e1b383279dcbda44f428486e70935e",
-      "bytes": 26278
+      "sha256": "726cd9143ceb7818fa16127980bdbd0d24df0dd0c0c2592e7ccacd046461435c",
+      "bytes": 27391
     },
     {
       "pfad": "tools/ota_update.py",

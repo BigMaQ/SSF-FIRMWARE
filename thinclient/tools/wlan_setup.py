@@ -223,11 +223,19 @@ def ap_starten(ssid: Optional[str] = None, passwort: Optional[str] = None) -> tu
     sicherheit = (["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
                   if psk else ["wifi-sec.key-mgmt", "none"])
     ip = ["ipv4.method", "shared", "ipv4.addresses", AP_ADRESSE, "ipv6.method", "ignore"]
-    versuche = [
-        basis + ["802-11-wireless.powersave", "2"] + sicherheit + ip,
-        basis + sicherheit + ip,
-        basis + ip,                       # ohne Sicherheitsblock (offen per Vorgabe)
-    ]
+    # Reihenfolge nach Befund (gemessen auf mlan0 / mwifiex, 18.11.):
+    # ``wifi-sec.key-mgmt none`` laesst NetworkManager trotzdem ein
+    # Sicherheitsobjekt anlegen und verlangt dann WEP-Schluessel
+    # („Secrets were required" / „password for 802-11-wireless-security.wep-key0
+    # not given") — der AP kommt damit NIE hoch. Ein offener AP entsteht nur,
+    # wenn man den Sicherheitsblock ganz weglaesst.
+    offen = basis + ip
+    versuche = ([offen,
+                 basis + sicherheit + ip,
+                 basis + ["802-11-wireless.powersave", "2"] + sicherheit + ip]
+                if not psk else
+                [basis + ["802-11-wireless.powersave", "2"] + sicherheit + ip,
+                 basis + sicherheit + ip])
     meldungen: list[str] = []
     for nummer, argumente in enumerate(versuche, start=1):
         nmcli("connection", "delete", AP_NAME, timeout=12)
@@ -554,10 +562,19 @@ class Waechter(threading.Thread):
                 # dieselbe Karte nicht mehr scannen — die Netze, die das Handy zur
                 # Auswahl braucht, müssen vorher in die Zustandsdatei.
                 try:
-                    self.letzte_netze = netze_scannen()
+                    # Nur scannen, wenn wir noch keine Liste haben: im AP-Modus
+                    # kann dieselbe Karte nicht scannen und liefert 0 Netze
+                    # (so kam auf 192.168.20.65 eine leere Auswahlliste an).
+                    # Die alte Liste aus der Zustandsdatei ist besser als eine leere.
+                    if not self.letzte_netze:
+                        self.letzte_netze = netze_scannen()
                 except Exception as exc:                    # noqa: BLE001
                     self.letzte_netze = []
                     fehler = f"Scan: {type(exc).__name__}: {exc}"
+                if not self.letzte_netze:
+                    alt = zustand_lesen(self.state_pfad).get("netze")
+                    if isinstance(alt, list) and alt:
+                        self.letzte_netze = alt
                 try:
                     ok, meldung = ap_starten(self.ssid)
                 except Exception as exc:                    # noqa: BLE001
