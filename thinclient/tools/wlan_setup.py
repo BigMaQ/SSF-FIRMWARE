@@ -211,24 +211,47 @@ def ap_starten(ssid: Optional[str] = None, passwort: Optional[str] = None) -> tu
     psk = (passwort if passwort is not None
            else os.environ.get("FDC_SETUP_PSK", "")).strip()
     nmcli("connection", "delete", AP_NAME, timeout=12)      # Reste aufräumen
-    argumente = [
+    # Drei Anläufe, vom ausführlichen zum schlichten Aufruf. Grund: welche
+    # Eigenschaft eine WLAN-Firmware (hier mwifiex/mlan0) ablehnt, ist von
+    # Kernel zu Kernel verschieden — der Dienst darf daran nicht scheitern,
+    # denn der AP ist auf einer Box ohne Netz der EINZIGE Zugang.
+    basis = [
         "connection", "add", "type", "wifi", "ifname", karte, "con-name", AP_NAME,
         "autoconnect", "no", "ssid", ssid, "802-11-wireless.mode", "ap",
-        "802-11-wireless.band", "bg", "802-11-wireless.powersave", "2",
+        "802-11-wireless.band", "bg",
     ]
-    if psk:
-        argumente += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
-    else:
-        argumente += ["wifi-sec.key-mgmt", "none"]
-    argumente += ["ipv4.method", "shared", "ipv4.addresses", AP_ADRESSE,
-                  "ipv6.method", "ignore"]
-    rc, aus = nmcli(*argumente, timeout=25)
-    if rc != 0:
-        return False, f"AP anlegen fehlgeschlagen: {aus[:300]}"
-    rc, aus = nmcli("-w", "30", "connection", "up", AP_NAME, timeout=45)
-    if rc != 0:
-        return False, f"AP starten fehlgeschlagen: {aus[:300]}"
-    return True, ssid
+    sicherheit = (["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
+                  if psk else ["wifi-sec.key-mgmt", "none"])
+    ip = ["ipv4.method", "shared", "ipv4.addresses", AP_ADRESSE, "ipv6.method", "ignore"]
+    versuche = [
+        basis + ["802-11-wireless.powersave", "2"] + sicherheit + ip,
+        basis + sicherheit + ip,
+        basis + ip,                       # ohne Sicherheitsblock (offen per Vorgabe)
+    ]
+    meldungen: list[str] = []
+    for nummer, argumente in enumerate(versuche, start=1):
+        nmcli("connection", "delete", AP_NAME, timeout=12)
+        rc, aus = nmcli(*argumente, timeout=25)
+        if rc != 0:
+            meldungen.append(f"Versuch {nummer} anlegen fehlgeschlagen: {aus.strip()[:160]}")
+            continue
+        rc, aus = nmcli("-w", "30", "connection", "up", AP_NAME, timeout=45)
+        if rc == 0:
+            if nummer > 1:
+                print(f"[wlan-setup] AP im Versuch {nummer} gestartet", flush=True)
+            return True, ssid
+        meldungen.append(f"Versuch {nummer} starten fehlgeschlagen: {aus.strip()[:160]}")
+    # Letzte Rettung: NetworkManagers eigener Hotspot-Kurzbefehl. Er setzt die
+    # Verbindung anders zusammen und kommt mit Karten durch, die `mode ap`
+    # ablehnen.
+    nmcli("connection", "delete", AP_NAME, timeout=12)
+    rc, aus = nmcli("device", "wifi", "hotspot", "ifname", karte, "ssid", ssid,
+                    "con-name", AP_NAME, timeout=40)
+    if rc == 0:
+        print("[wlan-setup] AP über den Hotspot-Kurzbefehl gestartet", flush=True)
+        return True, ssid
+    meldungen.append(f"hotspot fehlgeschlagen: {aus.strip()[:160]}")
+    return False, " | ".join(meldungen)
 
 
 def ap_stoppen() -> None:
@@ -525,19 +548,32 @@ class Waechter(threading.Thread):
             zustand_schreiben(self.state_pfad, {"aktiv": False, "stand": "wlan",
                                                 "ssid": "", "url": f"http://{AP_IP}"})
         else:
+            fehler = ""
             if not ap_laeuft():
                 # WICHTIG: erst scannen, dann den AP hochziehen.  Im AP-Modus kann
                 # dieselbe Karte nicht mehr scannen — die Netze, die das Handy zur
                 # Auswahl braucht, müssen vorher in die Zustandsdatei.
-                self.letzte_netze = netze_scannen()
-                ok, meldung = ap_starten(self.ssid)
+                try:
+                    self.letzte_netze = netze_scannen()
+                except Exception as exc:                    # noqa: BLE001
+                    self.letzte_netze = []
+                    fehler = f"Scan: {type(exc).__name__}: {exc}"
+                try:
+                    ok, meldung = ap_starten(self.ssid)
+                except Exception as exc:                    # noqa: BLE001
+                    ok, meldung = False, f"{type(exc).__name__}: {exc}"
                 if not ok:
+                    fehler = meldung
                     print(f"[wlan-setup] AP nicht gestartet: {meldung}", file=sys.stderr,
                           flush=True)
+            # Der Grund MUSS in die Zustandsdatei: ohne SSH ist der Bildschirm die
+            # einzige Auskunft. Vorher stand er nur im Journal — vor der Box
+            # stehend sah man dann bloß „kein Netz".
             zustand_schreiben(self.state_pfad, {"aktiv": True, "stand": "setup",
                                                 "ssid": self.ssid,
                                                 "url": f"http://{AP_IP}",
                                                 "netze": self.letzte_netze[:24],
+                                                "fehler": fehler,
                                                 "hinweis": "LAN nutzen oder WLAN einrichten"})
         self.letzter_stand = stand
         return stand

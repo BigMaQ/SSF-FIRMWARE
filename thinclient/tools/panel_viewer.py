@@ -378,7 +378,8 @@ class PanelFenster(DiagFensterMixin, QWidget):
             # Handy — die Anleitung ist wichtiger als „SYSTEMS UNAVAIL".
             setup_zeichnen(maler, QRectF(self.rect()),
                            str(hinweis.get("ssid") or ""),
-                           str(hinweis.get("url") or ""))
+                           str(hinweis.get("url") or ""),
+                           str(hinweis.get("fehler") or ""))
         elif meldung:
             # Erst prüfen, ob am Gerät selbst etwas kaputt ist (fehlendes Modul,
             # kein Schreibrecht, unplausible Uhr): dann zeigt der Bildschirm die
@@ -608,7 +609,8 @@ class CanvasFenster(DiagFensterMixin, QWidget):
                 if hinweis:
                     setup_zeichnen(maler, QRectF(*teil["rect"]),
                                    str(hinweis.get("ssid") or ""),
-                                   str(hinweis.get("url") or ""))
+                                   str(hinweis.get("url") or ""),
+                                   str(hinweis.get("fehler") or ""))
                 else:
                     bericht = self.selbstauskunft()
                     if bericht is not None and getattr(bericht, "fehler", False):

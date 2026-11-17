@@ -203,6 +203,50 @@ class BeaconLauscher(threading.Thread):
                 pass
 
 
+# ------------------------------------------------------- Wann NICHT abschalten
+WLAN_STATE = "/run/fdc-wlan-setup.json"
+
+
+def _hat_uplink() -> bool:
+    """Steht eine Standardroute? Ohne Uplink kommt nie ein Beacon — und ohne
+    Uplink laesst sich die Box auch nicht einrichten."""
+    try:
+        lauf = subprocess.run(["ip", "route", "show", "default"],
+                              capture_output=True, text=True, timeout=6)
+    except (OSError, subprocess.SubprocessError):
+        return True                      # im Zweifel: nicht sperren
+    return bool(lauf.stdout.strip())
+
+
+def abschalt_sperre(state_pfad: str = WLAN_STATE,
+                    uplink: Optional[Callable[[], bool]] = None) -> Optional[str]:
+    """Grund, warum der Client jetzt NICHT abschalten darf (``None`` = darf).
+
+    Zwei Faelle, beide real aufgetreten:
+
+    * ``einrichtung`` — der Einrichtungs-AP laeuft, jemand steht mit dem Handy
+      davor. Abschalten waere hier besonders bloed: der AP ist der einzige Weg,
+      die Box zu erreichen.
+    * ``kein_netz`` — kein LAN, kein WLAN, also kein Beacon und kein Bild. Genau
+      so sieht ein Client aus, der auf seine Einrichtung wartet (Kabel gezogen,
+      WLAN noch nicht gesetzt). Frueher fuhr er nach ``auto_off_min`` herunter —
+      mitten in der Einrichtung, und niemand kam mehr dran.
+    """
+    try:
+        daten = json.loads(Path(state_pfad).read_text(encoding="utf-8"))
+        if str(daten.get("stand", "")).strip().lower() == "setup":
+            return "einrichtung"
+    except (OSError, ValueError):
+        pass
+    pruefer = uplink or _hat_uplink
+    try:
+        if not pruefer():
+            return "kein_netz"
+    except Exception:                    # eine kaputte Pruefung darf nie abschalten
+        return "kein_netz"
+    return None
+
+
 # ------------------------------------------------------------------------- Ablauf
 def herunterfahren(befehl: str = "poweroff") -> bool:
     """Client herunterfahren (``poweroff``) bzw. neu starten (``reboot``)."""
@@ -239,6 +283,15 @@ def einmal(lauscher: Optional[BeaconLauscher], cfg: dict,
         "config": cfg,
     })
     if ergebnis.get("aktion") == "poweroff":
+        sperre = abschalt_sperre()
+        if sperre:
+            # Warten statt abschalten: Einrichtung laeuft oder es gibt keinen
+            # Weg hierher. Grund steht im Zustand (und damit im FDC).
+            ergebnis["aktion"] = None
+            ergebnis["aus_in_s"] = None
+            ergebnis["gesperrt"] = sperre
+            zustand_schreiben(ergebnis)
+            return ergebnis
         zustand_schreiben(ergebnis)
         ausschalten("poweroff")
     else:

@@ -247,6 +247,18 @@ for DATEI in infra/panel_stream.py tools/panel_viewer.py tools/panel_agent.py; d
 done
 systemctl restart fdc-clock.service 2>/dev/null || true
 
+# --- 5d. Dienste wirklich eingeschaltet? -----------------------------------
+# Ein abgebrochener Erstlauf hat fdc-wlan-setup "disabled" zurueckgelassen: kein
+# Einrichtungs-AP, kein Hotspot am Handy — und am Panel stand nur "no network".
+# enable --now ist idempotent, kostet nichts und deckt genau diese Luecke.
+schritt "Dienste pruefen"
+for DIENST in fdc-agent fdc-panel fdc-ota fdc-poweroff fdc-wlan-setup fdc-clock fdc-rechte fdc-ident; do
+    if ! systemctl is-enabled --quiet "$DIENST.service" 2>/dev/null; then
+        echo "  $DIENST war aus — wird eingeschaltet"
+        systemctl enable --now "$DIENST.service" 2>/dev/null || echo "  WARNUNG: $DIENST laesst sich nicht einschalten"
+    fi
+done
+
 # --- 6. Neustart, falls nötig (genau einmal) -------------------------------
 schritt "Abschluss"
 touch "$MARKER"

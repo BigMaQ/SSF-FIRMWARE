@@ -1,7 +1,7 @@
 {
-  "version": "0.12.22",
+  "version": "0.12.23",
   "datum": "2026-11-17",
-  "hinweis": "Erstlauf haertet sich selbst: halb fertiges dpkg wird repariert (sonst fehlt der X-Server und das Panel startet nie), der Reboot wartet auf das laufende OTA, fehlende Dateien in /opt/fdc werden nachgezogen; waehrend der Einrichtung verweigert der Agent Neustart",
+  "hinweis": "Einrichtungs-AP mit drei Anlaeufen + Hotspot-Fallback (Karten lehnen einzelne nmcli-Eigenschaften ab), Grund fuer gescheiterten AP steht auf dem Panel, kein Auto-Poweroff waehrend der Einrichtung oder ohne Uplink",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "f23c8d7f7bcbb5918d8c2d73c69521e934848fdee6dee09cb76e58bf0870d0a9",
-      "bytes": 61308
+      "sha256": "c1e34df82274035ce324a0793617f5b0d729616ea866333f8793222134abda04",
+      "bytes": 61438
     },
     {
       "pfad": "tools/panel_agent.py",
@@ -25,8 +25,8 @@
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "639daa2a4e8fedef4ab07d369a0852624b4db93906ce5f9294addef4d46cfde9",
-      "bytes": 31116
+      "sha256": "e8699b753f2cf997322ac2b8b31fd43bce0e6bdbde27ac568b0aaf916dd6dfcb",
+      "bytes": 32427
     },
     {
       "pfad": "tools/panel_grab.py",
@@ -35,8 +35,8 @@
     },
     {
       "pfad": "tools/wlan_setup.py",
-      "sha256": "222daac7d8c29d3e5af6012d63c692b50b32290654b0b1e562b53149892756d0",
-      "bytes": 24170
+      "sha256": "4c0963195d21fa7b8e9600d2236bd72430e1b383279dcbda44f428486e70935e",
+      "bytes": 26278
     },
     {
       "pfad": "tools/ota_update.py",
@@ -50,8 +50,8 @@
     },
     {
       "pfad": "tools/power_idle.py",
-      "sha256": "e729219969aa2495f4d9287f23b24ec2bafc2901b7e1a512d6004012f9d29d52",
-      "bytes": 10830
+      "sha256": "c8383a7c4abd7d9794a5dbdc7f0b087549794a191076ef85892880764530c9e5",
+      "bytes": 13029
     },
     {
       "pfad": "tools/os_update.py",
@@ -110,8 +110,8 @@
     },
     {
       "pfad": "firstboot.sh",
-      "sha256": "d3618d4d368b507189aadbdcbe6d75a44e8c53a18ea2d0a37b8661a7f4c637fe",
-      "bytes": 12611
+      "sha256": "79241c55ed7b2a135f9293506a83c3a75bdbca2c0899cb80d831b9be04c0e9de",
+      "bytes": 13321
     }
   ]
 }

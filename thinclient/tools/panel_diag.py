@@ -505,7 +505,8 @@ def setup_hinweis(pfad: str = SETUP_DATEI) -> dict:
     return daten if isinstance(daten, dict) and daten.get("aktiv") else {}
 
 
-def setup_zeichnen(maler: QPainter, flaeche, ssid: str, adresse: str) -> int:
+def setup_zeichnen(maler: QPainter, flaeche, ssid: str, adresse: str,
+                   fehler: str = "") -> int:
     """Anleitung auf dem Bildschirm — ohne Tastatur der einzige Weg zum Nutzer.
 
     Ohne diesen Hinweis sieht der Client aus wie „kaputt": schwarzer Schirm, kein
@@ -567,6 +568,31 @@ def setup_zeichnen(maler: QPainter, flaeche, ssid: str, adresse: str) -> int:
         maler.drawText(QRectF(inner.x(), y, inner.width(), groesse * 1.7),
                        Qt.AlignLeft | Qt.AlignVCenter, zeile)
         y += groesse * 1.8
+    if fehler:
+        # Warum kein Hotspot kommt, sieht man sonst nur im Journal — und das ist
+        # ohne Netz und ohne SSH unerreichbar. Deshalb hier auf den Schirm, über
+        # zwei Zeilen umgebrochen und an Wortgrenzen gekürzt: eine harte
+        # Zeichengrenze schnitt mitten in „powersave" ab, also genau die Stelle,
+        # die den Fehler erklärt.
+        maler.setPen(QColor(240, 120, 120))
+        maler.setFont(QFont("DejaVu Sans", max(8, int(groesse * 0.8))))
+        masse = maler.fontMetrics()
+        rest = str(fehler).strip().replace("\n", " ").split()
+        for _ in range(2):
+            if not rest:
+                break
+            zeile_fehler = ""
+            while rest:
+                probe = (zeile_fehler + " " + rest[0]).strip()
+                if masse.horizontalAdvance(probe) > inner.width() and zeile_fehler:
+                    break
+                zeile_fehler = probe
+                rest.pop(0)
+            if rest:                       # gekürzt → Auslassungszeichen
+                zeile_fehler = zeile_fehler.rstrip() + " …"
+            maler.drawText(QRectF(inner.x(), y, inner.width(), groesse * 1.3),
+                           Qt.AlignLeft | Qt.AlignVCenter, zeile_fehler)
+            y += groesse * 1.3
     return groesse
 
 
