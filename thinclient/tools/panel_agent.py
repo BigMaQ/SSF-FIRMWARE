@@ -205,7 +205,8 @@ def pruefe_layout(daten) -> dict:
         if not (-360.0 <= drehung <= 360.0):
             raise ValueError("'leinwaende': rotate muss -360 … 360 sein")
         leinwaende.append({"screen": schirm, "width": breite,
-                           "height": hoehe, "rotate": drehung})
+                           "height": hoehe, "rotate": drehung,
+                           "mitdrehen": bool(eintrag.get("mitdrehen", False))})
     if leinwaende:
         sauber["leinwaende"] = leinwaende
     gesehen = set()
@@ -267,6 +268,9 @@ def pruefe_layout(daten) -> dict:
         neu["width"], neu["height"] = breite, hoehe
         neu["offset_x"], neu["offset_y"] = off_x, off_y
         neu["diag"] = bool(eintrag.get("diag", False))
+        # Ausrichthilfen: muss durchgereicht werden, sonst kommt die Einstellung
+        # aus dem FDC nie beim Viewer an (der liest sie aus panels.json).
+        neu["hilfen"] = bool(eintrag.get("hilfen", False))
         # "canvas": true -> dieses Panel gehört auf die gedrehte Leinwand
         neu["canvas"] = bool(eintrag.get("canvas", False))
         if eintrag.get("crop"):

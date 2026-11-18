@@ -25,7 +25,7 @@ from typing import Optional
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 
 #: Ampel-Farben. „warn" heißt: erreichbar, aber nicht betriebsbereit
@@ -388,6 +388,78 @@ def _diag_schluessel(name: str) -> str:
     """``Stream Active`` → ``stream_active`` (Schlüssel in panel_lang)."""
     return (str(name).strip().lower().replace(" ", "_")
             .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue"))
+
+
+def ausricht_zeichnen(maler: QPainter, flaeche, panel_id: str = "",
+                      raster: bool = True, mitte: bool = True) -> None:
+    """Ausrichthilfen über das laufende Bild legen.
+
+    Der Rahmen im Panel verdeckt die Bildschirmkante — deshalb Eckenwinkel,
+    Kantenmitten und ein feines Raster zeichnen, damit sich der sichtbare
+    Ausschnitt einmessen lässt.  Dieselbe Geometrie nutzt das Testbild, damit
+    „was ich im Testbild sehe" und „was ich am echten Panel ausrichte" identisch
+    sind (vorher gab es die Hilfen nur im Testbild, ohne Weg sie aufzurufen).
+    """
+    x0 = flaeche.x() if hasattr(flaeche, "x") else 0.0
+    y0 = flaeche.y() if hasattr(flaeche, "y") else 0.0
+    breite, hoehe = float(flaeche.width()), float(flaeche.height())
+    if breite <= 1 or hoehe <= 1:
+        return
+    maler.save()
+    # Raster: 10 % der kürzeren Seite als Abstand, dünn und halbtransparent.
+    if raster:
+        schritt = max(20.0, min(breite, hoehe) / 10.0)
+        maler.setPen(QPen(QColor(0, 200, 120, 60), 1))
+        x = x0 + schritt
+        while x < x0 + breite - 1:
+            maler.drawLine(QPointF(x, y0), QPointF(x, y0 + hoehe))
+            x += schritt
+        y = y0 + schritt
+        while y < y0 + hoehe - 1:
+            maler.drawLine(QPointF(x0, y), QPointF(x0 + breite, y))
+            y += schritt
+    # Rahmen (grün) + Eckenwinkel (weiß) + Kantenmitten
+    rand = max(2.0, min(breite, hoehe) * 0.004)
+    maler.setPen(QPen(QColor(0, 180, 90), max(1.0, rand)))
+    maler.drawRect(QRectF(x0 + rand / 2, y0 + rand / 2,
+                          breite - rand, hoehe - rand))
+    weiss = QColor(255, 255, 255)
+    lang = max(24.0, min(breite, hoehe) * 0.09)
+    dick = max(2.0, min(breite, hoehe) * 0.004)
+    ecken = ((x0 + rand, y0 + rand, 1, 1),
+             (x0 + breite - rand, y0 + rand, -1, 1),
+             (x0 + rand, y0 + hoehe - rand, 1, -1),
+             (x0 + breite - rand, y0 + hoehe - rand, -1, -1))
+    for (x, y, dx, dy) in ecken:
+        maler.fillRect(QRectF(x if dx > 0 else x - lang, y, lang, dick), weiss)
+        maler.fillRect(QRectF(x if dx > 0 else x - dick, y if dy > 0 else y - lang,
+                              dick, lang), weiss)
+    tick = max(10.0, min(breite, hoehe) * 0.05)
+    mitte_x, mitte_y = x0 + breite / 2, y0 + hoehe / 2
+    for rechteck in (QRectF(mitte_x - dick / 2, y0 + rand, dick, tick),
+                     QRectF(mitte_x - dick / 2, y0 + hoehe - rand - tick, dick, tick),
+                     QRectF(x0 + rand, mitte_y - dick / 2, tick, dick),
+                     QRectF(x0 + breite - rand - tick, mitte_y - dick / 2, tick, dick)):
+        maler.fillRect(rechteck, weiss)
+    if mitte:
+        # Fadenkreuz in der Mitte: zeigt sofort, ob das Bild symmetrisch sitzt.
+        arm = max(8.0, min(breite, hoehe) * 0.02)
+        maler.setPen(QPen(QColor(255, 255, 255, 200), max(1.0, dick)))
+        maler.drawLine(QPointF(mitte_x - arm, mitte_y),
+                       QPointF(mitte_x + arm, mitte_y))
+        maler.drawLine(QPointF(mitte_x, mitte_y - arm),
+                       QPointF(mitte_x, mitte_y + arm))
+    if panel_id:
+        band = max(16.0, hoehe * 0.04)
+        maler.fillRect(QRectF(x0, y0 + band * 0.4, breite, band),
+                       QColor(0, 0, 0, 150))
+        maler.setPen(QPen(QColor(0, 220, 140), 1))
+        maler.setFont(QFont("DejaVu Sans", max(8, int(band * 0.55))))
+        maler.drawText(QRectF(x0, y0 + band * 0.4, breite, band),
+                       Qt.AlignCenter,
+                       f"{panel_id}  {int(breite)}x{int(hoehe)}  "
+                       f"@ {int(x0)},{int(y0)}")
+    maler.restore()
 
 
 def warnband_zeichnen(maler: QPainter, flaeche, text: str) -> None:

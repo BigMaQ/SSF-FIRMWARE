@@ -1,7 +1,7 @@
 {
-  "version": "0.12.29",
+  "version": "0.12.30",
   "datum": "2026-11-18",
-  "hinweis": "OTA haertet sich: Sperre gegen zwei gleichzeitige Installationen (die zerlegten sich bisher gegenseitig das Staging - danach fehlten panel_agent.py und panel_viewer.py, der Agent startete nicht mehr, der Status sagte trotzdem aktualisiert), und Vollstaendigkeitspruefung nach dem Austausch mit Rollback",
+  "hinweis": "Bildschirmschoner nur noch bei SYSTEMS UNAVAIL (kein Stream UND kein FDC) statt nach Zeit; Xorg-Bildschirmabschaltung (DPMS) wird beim Start abgeschaltet; Ausrichthilfen als Overlay (FDC-Haekchen oder F9 am Geraet) mit Rahmen, Ecken, Kantenmitten, Raster und Fadenkreuz; Leinwand kann mitdrehen (Haken im FDC): Panel-Rechtecke im gedrehten Raster einstellen",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,18 +15,18 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "14786531acf7d4e24b699a7be332d69c305ffe09aa2263267868191bae27982c",
-      "bytes": 61863
+      "sha256": "c788a67b764ed8c7a0d43c4975b77ebf73c0878325c5780c2909c90287e25483",
+      "bytes": 66931
     },
     {
       "pfad": "tools/panel_agent.py",
-      "sha256": "fa59c88e4dfd8eea3a4c98c4ef05847eb5715fb529978c929502664657f74577",
-      "bytes": 49132
+      "sha256": "11d9730c175636bacfe429fdbc40f80187e78c5c852bf5bf62ac0668796f77f6",
+      "bytes": 49425
     },
     {
       "pfad": "tools/panel_diag.py",
-      "sha256": "e8699b753f2cf997322ac2b8b31fd43bce0e6bdbde27ac568b0aaf916dd6dfcb",
-      "bytes": 32427
+      "sha256": "d931c189820890dc1b5e4e260c0823860485937af8a0efa95d5502590e5a3920",
+      "bytes": 36081
     },
     {
       "pfad": "tools/panel_grab.py",
@@ -50,8 +50,8 @@
     },
     {
       "pfad": "tools/power_idle.py",
-      "sha256": "3028665a503f2fe7534aed49eb6a8f5700fbf50d1864506a74ac18a0894b214f",
-      "bytes": 15787
+      "sha256": "3158974aa4e25abe8279e56193b6a21dfe2a055f45e31a407bfea99b93831bdf",
+      "bytes": 16878
     },
     {
       "pfad": "tools/os_update.py",

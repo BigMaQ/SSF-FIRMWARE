@@ -46,6 +46,8 @@ import json
 import math
 import os
 import socket
+import math
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -61,20 +63,23 @@ from PySide6.QtGui import QImage, QPainter, QPen, QPixmap  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 try:                                     # als Paket (Tests)
-    from tools.panel_diag import (DiagMonitor, abdunkeln, diag_splash_zeichnen,
+    from tools.panel_diag import (DiagMonitor, abdunkeln, ausricht_zeichnen,
+                                  diag_splash_zeichnen,
                                   diag_zeichnen, os_stand, ota_popup, ota_stand,
                                   setup_hinweis, setup_zeichnen, splash_zeichnen,
                                   problem_texte, status_popup,
                                   unavail_zeichnen, warnband_zeichnen)
-    from tools import panel_lang, panel_selfcheck
+    from tools import panel_lang, panel_selfcheck, power_idle
 except ImportError:                      # als Skript gestartet
-    from panel_diag import (DiagMonitor, abdunkeln, diag_splash_zeichnen,
+    from panel_diag import (DiagMonitor, abdunkeln, ausricht_zeichnen,
+                            diag_splash_zeichnen,
                             diag_zeichnen, os_stand, ota_popup, ota_stand,
                             setup_hinweis, setup_zeichnen, splash_zeichnen,
                             problem_texte, status_popup,
                             unavail_zeichnen, warnband_zeichnen)
     import panel_lang
     import panel_selfcheck
+    import power_idle
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +212,22 @@ class DiagFensterMixin:
         self._bericht_stand = jetzt
         return self._bericht
 
+    def stream_aktiv(self) -> bool:             # noqa: D102 (Haken der Unterklasse)
+        raise NotImplementedError
+
+    def schoner_erlaubt(self) -> bool:
+        """Darf der Bildschirmschoner greifen?  Nur bei echtem Ausfall.
+
+        Bisher dimmte die Anzeige allein nach Zeit ohne Bild — im Flug also
+        nebenbei, wenn ein Panel kurz nichts liefert.  Gewollt ist der Schoner
+        nur bei „SYSTEMS UNAVAIL": **kein** Stream **und** **kein** FDC.  Solange
+        der FDC da ist, sieht man auf dem Schirm ohnehin dessen Meldungen.
+        """
+        try:
+            return not self.stream_aktiv() and not power_idle.fdc_erreichbar()
+        except Exception:                     # noqa: BLE001 - Schoner ist Beiwerk
+            return False
+
     def abdunkeln_wenn_noetig(self, maler, flaeche, sekunden: float) -> bool:
         if self._dim_nach <= 0 or self._dim_staerke <= 0:
             return False
@@ -227,11 +248,13 @@ class PanelFenster(DiagFensterMixin, QWidget):
                  strecken: bool = False, debug: bool = False,
                  scale: str = "contain", zoom: float = 1.0,
                  diag: bool = False, monitor: Optional["DiagMonitor"] = None,
-                 rotate: float = 0.0) -> None:
+                 rotate: float = 0.0, hilfen: bool = False) -> None:
         super().__init__()
         self.panel_id = panel_id
         #: Ausgleichsdrehung des Bildes (Monitor schief verbaut) — nicht der Ort
         self.rotate = float(rotate or 0.0)
+        #: Ausrichthilfen (Rahmen/Ecken/Raster) — vom FDC geschaltet, lokal per F9
+        self.hilfen = bool(hilfen)
         #: Diag-Overlay (GlassOut/Sim/FDC/Bildrate/CPU) — vom FDC geschaltet
         self.diag = diag
         self.monitor = monitor
@@ -327,6 +350,23 @@ class PanelFenster(DiagFensterMixin, QWidget):
         return bool(self._pixmap is not None and not self._pixmap.isNull()
                     and self._kein_bild_sekunden() < 5.0)
 
+    def stream_aktiv(self) -> bool:
+        """Kommt gerade Bild? (Haken für die Bildschirmschoner-Entscheidung)"""
+        return bool(self._stream_aktiv())
+
+    def keyPressEvent(self, ereignis) -> None:         # noqa: N802 (Qt-Name)
+        """F9 blendet die Ausrichthilfen ein/aus.
+
+        Der Client ist „armlos", aber beim Einrichten steht man davor — mit
+        Tastatur ist das der schnellste Weg, ohne FDC-Umweg zu prüfen, ob der
+        sichtbare Ausschnitt stimmt.
+        """
+        if ereignis.key() == Qt.Key_F9:
+            self.hilfen = not self.hilfen
+            self.update()
+            return
+        super().keyPressEvent(ereignis)
+
     def dimmen(self, maler: QPainter) -> None:
         """Bildschirmschoner: bei langer Bildlosigkeit alles abdimmen."""
         self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
@@ -396,7 +436,8 @@ class PanelFenster(DiagFensterMixin, QWidget):
                                  detail=panel_lang.text("keine_daten", code,
                                                         panel=self.panel_id),
                                  titel=panel_lang.text("unavail", code))
-                self.dimmen(maler)
+                if self.schoner_erlaubt():
+                    self.dimmen(maler)
         elif self.diag and self.monitor is not None:
             diag_zeichnen(maler, QRectF(self.rect()), self.monitor.werte(),
                           fps=len(self._fps_fenster) / 2.0)
@@ -417,6 +458,10 @@ class PanelFenster(DiagFensterMixin, QWidget):
                     warnband_zeichnen(maler, QRectF(self.rect()),
                                       panel_lang.text("diag_warnband", code,
                                                       text=texte[0]))
+        if self.hilfen:
+            # Ausrichthilfen GANZ oben: sie sollen die Kante zeigen, nicht hinter
+            # einer Meldung verschwinden. Beim Einmessen stört die Meldung nicht.
+            ausricht_zeichnen(maler, QRectF(self.rect()), self.panel_id)
         if not self._testbetrieb and not hinweis:
             # Update-Hinweis klein in die Ecke: es soll nicht wie eine Störung
             # des Panels aussehen, aber ohne Hinweis merkt niemand davon.
@@ -472,11 +517,17 @@ class CanvasFenster(DiagFensterMixin, QWidget):
 
     def __init__(self, rect: tuple[int, int, int, int], canvas_w: int, canvas_h: int,
                  rotate: float = 0.0, vollbild: bool = True, debug: bool = False,
-                 monitor: Optional["DiagMonitor"] = None) -> None:
+                 monitor: Optional["DiagMonitor"] = None,
+                 hilfen: bool = False, mitdrehen: bool = False) -> None:
         super().__init__()
         self.canvas_w = max(1, int(canvas_w))
         self.canvas_h = max(1, int(canvas_h))
         self.rotate = float(rotate or 0.0)
+        #: Ausrichthilfen (Rahmen/Ecken/Raster) — vom FDC geschaltet, lokal per F9
+        self.hilfen = bool(hilfen)
+        #: Leinwand als Ganzes mitdrehen (statt nur das Bild in jedem Panel).
+        #: Damit lassen sich die Panel-Rechtecke im gedrehten Raster einstellen.
+        self.mitdrehen = bool(mitdrehen)
         self.zoom = 1.0
         self.debug = debug
         self.monitor = monitor
@@ -501,8 +552,10 @@ class CanvasFenster(DiagFensterMixin, QWidget):
             "rect": (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])),
             "scale": scale or "contain",
             "zoom": max(0.1, min(4.0, float(zoom or 1.0))),
-            # Drehung gilt dem BILD in diesem Rechteck, nicht dem Platz
-            "rotate": float(self.rotate if rotate is None else rotate),
+            # Drehung gilt dem BILD in diesem Rechteck, nicht dem Platz.  Dreht
+            # die Leinwand selbst mit, ist die Bilddrehung 0 (sonst zweimal).
+            "rotate": float(0.0 if (rotate is None and self.mitdrehen)
+                            else (self.rotate if rotate is None else rotate)),
             "pixmap": None, "letzter": 0.0, "bisher": 0,
             "kb": 0.0, "fenster": [], "diag": bool(diag),
         }
@@ -534,6 +587,18 @@ class CanvasFenster(DiagFensterMixin, QWidget):
         teil = self.teile.get(panel_id)
         return len(teil["fenster"]) / 2.0 if teil else 0.0
 
+    def stream_aktiv(self) -> bool:
+        """Liefert mindestens ein Teil gerade Bild?"""
+        return any(self.keine_bild_sekunden(p) < 5.0 for p in self.teile)
+
+    def keyPressEvent(self, ereignis) -> None:         # noqa: N802 (Qt-Name)
+        """F9 blendet die Ausrichthilfen ein/aus (siehe PanelFenster)."""
+        if ereignis.key() == Qt.Key_F9:
+            self.hilfen = not self.hilfen
+            self.update()
+            return
+        super().keyPressEvent(ereignis)
+
     def keine_bild_sekunden(self, panel_id: str) -> float:
         """Sekunden ohne Bild für ein Teil — ohne je empfangenes Bild ab Start."""
         teil = self.teile.get(panel_id)
@@ -562,12 +627,19 @@ class CanvasFenster(DiagFensterMixin, QWidget):
         wanderten die Panels auf dem Schirm an andere Plätze, und genau das war
         falsch (Feldbefund 17.11.).
         """
-        faktor = min(self.width() / max(1, self.canvas_w),
-                     self.height() / max(1, self.canvas_h)) * self.zoom
-        links = (self.width() - self.canvas_w * faktor) / 2.0
-        oben = (self.height() - self.canvas_h * faktor) / 2.0
-        maler.translate(links, oben)
+        winkel = self.rotate if self.mitdrehen else 0.0
+        # Einpassen über die Bounding-Box: nur so passt eine gedrehte Leinwand
+        # vollständig ins Fenster (bei 90° sind Breite und Höhe vertauscht).
+        rad = math.radians(winkel)
+        cos, sin = abs(math.cos(rad)), abs(math.sin(rad))
+        bb_w = self.canvas_w * cos + self.canvas_h * sin
+        bb_h = self.canvas_w * sin + self.canvas_h * cos
+        faktor = min(self.width() / max(1.0, bb_w),
+                     self.height() / max(1.0, bb_h)) * self.zoom
+        maler.translate(self.width() / 2.0, self.height() / 2.0)
+        maler.rotate(winkel)
         maler.scale(faktor, faktor)
+        maler.translate(-self.canvas_w / 2.0, -self.canvas_h / 2.0)
         return faktor
 
     @staticmethod
@@ -611,6 +683,11 @@ class CanvasFenster(DiagFensterMixin, QWidget):
                 _bild_gedreht_zeichnen(maler, QRectF(*teil["rect"]), teil["pixmap"],
                                        teil.get("rotate", self.rotate),
                                        teil["scale"], teil["zoom"])
+                if self.hilfen:
+                    # Rechteck des Teils im Leinwand-Raum: so sieht man beim
+                    # Einstellen sofort, ob der Ausschnitt da sitzt, wo er soll.
+                    ausricht_zeichnen(maler, QRectF(*teil["rect"]), str(panel_id),
+                                      raster=False, mitte=True)
             elif not self._testbetrieb:
                 if hinweis:
                     setup_zeichnen(maler, QRectF(*teil["rect"]),
@@ -657,9 +734,17 @@ class CanvasFenster(DiagFensterMixin, QWidget):
             texte.insert(0, fehlt)
         if texte:
             warnband_zeichnen(maler, QRectF(self.rect()), texte[0])
-        # Bildschirmschoner: liefert kein Teil mehr Bild, wird alles abgedimmt
-        self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
-                                   self.laengste_stille())
+        if self.hilfen:
+            # Schirmkante: der Rahmen im Panel verdeckt sie, deshalb zuletzt und
+            # im Bildschirmraum (der Bild-Hinweis oben sitzt wie die übrigen
+            # Popups außerhalb der Leinwand-Transformation).
+            ausricht_zeichnen(maler, QRectF(self.rect()), "", raster=False)
+        # Bildschirmschoner nur bei echtem Ausfall (kein Stream **und** kein FDC).
+        # Vorher dimmte die Leinwand, sobald EIN Teil nichts lieferte — bei
+        # teilweise belegten Layouts also mitten im Flug.
+        if self.schoner_erlaubt():
+            self.abdunkeln_wenn_noetig(maler, QRectF(self.rect()),
+                                       self.laengste_stille())
 
 
 class _Steuerung(QObject):
@@ -731,28 +816,10 @@ class _Steuerung(QObject):
             maler.drawText(20, seite - 40, f"TESTBILD {zaehler['n']:04d}")
             maler.drawText(20, seite - 14, f"{fps} fps  {seite}x{seite}")
 
-            # Ausrichthilfen: der Rahmen im Panel verdeckt die Bildschirmkante,
-            # deshalb Eckenwinkel und Kantenmitten zeichnen — damit lässt sich
-            # der sichtbare Ausschnitt genau einmessen.
-            rand = 2
-            maler.setPen(QColor(0, 180, 90))
-            maler.drawRect(rand, rand, seite - 2 * rand - 1, seite - 2 * rand - 1)
-            weiss = QColor(255, 255, 255)
-            lang, dick = 54, 3
-            for (x, y, dx, dy) in ((rand, rand, 1, 1),
-                                   (seite - rand - 1, rand, -1, 1),
-                                   (rand, seite - rand - 1, 1, -1),
-                                   (seite - rand - 1, seite - rand - 1, -1, -1)):
-                maler.fillRect(x if dx > 0 else x - lang, y, lang, dick, weiss)   # waagerecht
-                maler.fillRect(x if dx > 0 else x - dick, y if dy > 0 else y - lang,
-                               dick, lang, weiss)                                 # senkrecht
-            # Kantenmitten: zeigen die Bildmitte jeder Seite (Rahmen-Symmetrie)
-            mitte, tick = seite // 2, 18
-            for (x, y, w, h) in ((mitte - dick // 2, rand, dick, tick),
-                                 (mitte - dick // 2, seite - rand - tick, dick, tick),
-                                 (rand, mitte - dick // 2, tick, dick),
-                                 (seite - rand - tick, mitte - dick // 2, tick, dick)):
-                maler.fillRect(x, y, w, h, weiss)
+            # Ausrichthilfen: dieselbe Geometrie wie das Overlay auf den echten
+            # Panels — sonst misst man im Testbild anders ein als am Flugzeug.
+            ausricht_zeichnen(maler, QRectF(0, 0, seite, seite), "TESTBILD",
+                              raster=False)
             maler.end()
             puffer = QBuffer()
             puffer.open(QBuffer.WriteOnly)
@@ -787,6 +854,9 @@ class PanelAuftrag:
     fps: int = 15
     engine_fps: int = 15
     strecken: bool = False
+    #: Ausrichthilfen über das Bild legen (Rahmen, Ecken, Raster, Fadenkreuz) —
+    #: zum Einmessen des sichtbaren Ausschnitts. Am Gerät auch per F9 schaltbar.
+    hilfen: bool = False
     #: Kein Netz: der Viewer erzeugt selbst Testbilder.  Damit lassen sich X, Qt,
     #: Skalierung, Cursor und Blanking prüfen, wenn Sim oder Engine nicht laufen —
     #: auch für Kunden die erste Funktionskontrolle.
@@ -874,9 +944,15 @@ class Layout:
 
         Quelle ist die Leinwand dieses Schirms (``leinwaende``), sonst die alte
         Einzel-Angabe ``canvas`` — und nur, wenn sie zu diesem Schirm gehört.
+
+        Dreht die Leinwand selbst mit (``mitdrehen``), bleibt hier 0: sonst
+        würde zweimal gedreht (Leinwand **und** Bild) und das Panel stünde
+        kopfüber.
         """
         for eintrag in self.leinwaende or []:
             if int(eintrag.get("screen") or 0) == int(screen):
+                if eintrag.get("mitdrehen"):
+                    return 0.0
                 return float(eintrag.get("rotate") or 0.0)
         if int(self.canvas_screen) in (int(screen), -1):
             return float(self.rotate or 0.0)
@@ -912,7 +988,8 @@ def layout_aus_datei(pfad: str) -> Layout:
             rahmen = {"screen": int(eintrag.get("screen") or 0),
                       "width": int(eintrag.get("width") or 0),
                       "height": int(eintrag.get("height") or 0),
-                      "rotate": float(eintrag.get("rotate") or 0.0)}
+                      "rotate": float(eintrag.get("rotate") or 0.0),
+                      "mitdrehen": bool(eintrag.get("mitdrehen", False))}
         except (TypeError, ValueError):
             continue
         if rahmen["width"] > 0 and rahmen["height"] > 0:
@@ -936,6 +1013,7 @@ def layout_aus_datei(pfad: str) -> Layout:
             fps=int(eintrag.get("fps") or 15),
             engine_fps=int(eintrag.get("engine_fps") or eintrag.get("fps") or 15),
             strecken=bool(eintrag.get("strecken", False)),
+            hilfen=bool(eintrag.get("hilfen", False)),
             test=bool(eintrag.get("test", False)),
             position=str(eintrag.get("position") or "full"),
             rotate=float(eintrag.get("rotate") if eintrag.get("rotate") is not None
@@ -971,6 +1049,9 @@ def layout_aus_argumenten(argv: list[str]) -> Layout:
     p.add_argument("--engine", type=_engine, default=("127.0.0.1", 8787),
                    metavar="HOST[:PORT]", help="Adresse der GlassOut-Engine")
     p.add_argument("--layout", help="JSON-Layoutdatei (statt --panel/--rect)")
+    p.add_argument("--hilfen", action="store_true",
+                   help="Ausrichthilfen einblenden (Rahmen, Ecken, Raster, Fadenkreuz) "
+                        "— am Gerät auch per F9")
     p.add_argument("--panel", action="append", default=[],
                    help="Panel-ID, mehrfach für mehrere Panels")
     p.add_argument("--rect", type=_rect, action="append", default=[],
@@ -1006,7 +1087,11 @@ def layout_aus_argumenten(argv: list[str]) -> Layout:
     args = p.parse_args(argv)
 
     if args.layout:
-        return layout_aus_datei(args.layout)
+        layout = layout_aus_datei(args.layout)
+        if getattr(args, "hilfen", False):
+            for auftrag in layout.panels:
+                auftrag.hilfen = True
+        return layout
 
     host, port = args.engine
     layout = Layout(engine_host=host, engine_port=port,
@@ -1029,7 +1114,8 @@ def layout_aus_argumenten(argv: list[str]) -> Layout:
             width=args.width[i] if i < len(args.width) else 0,
             height=args.height[i] if i < len(args.height) else 0,
             offset_x=args.offset_x[i] if i < len(args.offset_x) else 0,
-            offset_y=args.offset_y[i] if i < len(args.offset_y) else 0))
+            offset_y=args.offset_y[i] if i < len(args.offset_y) else 0,
+            hilfen=bool(getattr(args, "hilfen", False))))
     return layout
 
 
@@ -1099,7 +1185,9 @@ def _leinwand_bauen(layout: Layout, steuerung: _Steuerung, schirme,
         canvas = CanvasFenster(
             (geo.x(), geo.y(), breite, hoehe) if geo else (0, 0, breite, hoehe),
             canvas_w, canvas_h, rotate=float(flaeche.get("rotate") or 0.0),
-            vollbild=layout.vollbild, debug=layout.debug, monitor=monitor)
+            vollbild=layout.vollbild, debug=layout.debug, monitor=monitor,
+            hilfen=any(a.hilfen for a in meine),
+            mitdrehen=bool(flaeche.get("mitdrehen", False)))
         standard_hoehe = canvas_h // max(1, len(meine))
         for auftrag in meine:
             rect = (auftrag.offset_x, auftrag.offset_y,
@@ -1224,15 +1312,35 @@ def fenster_bauen(layout: "Layout", schirme, monitor=None, steuerung=None):
                            vollbild=layout.vollbild, strecken=auftrag.strecken,
                            debug=layout.debug, scale=auftrag.scale,
                            zoom=auftrag.zoom, diag=auftrag.diag, monitor=monitor,
-                           rotate=auftrag.rotate)
+                           rotate=auftrag.rotate, hilfen=auftrag.hilfen)
         gebaut.append((auftrag, win, rect))
     return gebaut
+
+
+def blanking_abschalten() -> None:
+    """X-Server davon abhalten, den Schirm abzuschalten.
+
+    Ohne das schaltet Xorg nach seiner Voreinstellung (typisch 10 Minuten) die
+    Anzeige ab — egal, was der Viewer zeichnet.  Im Flug sieht das wie ein
+    Bildschirmschoner aus, ist aber die X-DPMS-Einstellung.  Idempotent, und
+    wenn ``xset`` fehlt, ist es kein Fehler.
+    """
+    for befehl in (["xset", "s", "off"], ["xset", "s", "noblank"], ["xset", "-dpms"]):
+        try:
+            subprocess.run(befehl, timeout=5, capture_output=True)
+        except (OSError, subprocess.SubprocessError):
+            return
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     layout = layout_aus_argumenten(list(argv if argv is not None else sys.argv[1:]))
     app = QApplication(sys.argv[:1])
     app.setOverrideCursor(Qt.BlankCursor)
+    blanking_abschalten()
+    # Nachschlag: manche Sitzungen schalten DPMS beim Bildschirm-Event wieder ein.
+    nachschlag = QTimer()
+    nachschlag.timeout.connect(blanking_abschalten)
+    nachschlag.start(300_000)
     steuerung = _Steuerung()
     schirme = QApplication.screens()
     monitor: Optional[DiagMonitor] = None

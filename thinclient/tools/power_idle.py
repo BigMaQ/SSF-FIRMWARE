@@ -173,6 +173,36 @@ FDC_ADRESSE_DATEI = "/etc/fdc/fdc-server.json"
 FDC_ADRESSEN_MAX = 4
 
 
+#: Der Agent schreibt bei jeder Anfrage mit gueltigem Token einen Zeitstempel
+#: hierher (siehe ``panel_agent.herzschlag_schreiben``).
+HERZSCHLAG_DATEI = "/tmp/fdc-heartbeat"
+#: So lange darf der letzte FDC-Kontakt her sein, damit er noch als „da" gilt.
+FDC_FRISCH_S = 120.0
+
+
+def fdc_erreichbar(pfad: Optional[str] = None, max_alter: Optional[float] = None) -> bool:
+    """Hat sich der FDC kuerzlich gemeldet?
+
+    Grundlage ist der Herzschlag, den der Agent bei jeder Anfrage mit gueltigem
+    Token schreibt. Fehlt die Datei (kein FDC, alter Stand), gilt „nicht da" —
+    der Bildschirmschoner darf dann greifen.
+    """
+    ziel = Path(pfad or HERZSCHLAG_DATEI)
+    grenze = FDC_FRISCH_S if max_alter is None else float(max_alter)
+    try:
+        roh = ziel.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    try:
+        letzter = float(roh)
+    except ValueError:
+        try:
+            letzter = ziel.stat().st_mtime          # Fallback: Dateizeit
+        except OSError:
+            return False
+    return (time.time() - letzter) <= grenze
+
+
 def fdc_adresse_schreiben(adresse: str, pfad: Optional[str] = None) -> None:
     """Adresse eines FDC merken (aus Beacon **oder** aus einer Anfrage mit Token).
 
