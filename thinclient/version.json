@@ -1,7 +1,7 @@
 {
-  "version": "0.12.30",
+  "version": "0.12.31",
   "datum": "2026-11-18",
-  "hinweis": "Bildschirmschoner nur noch bei SYSTEMS UNAVAIL (kein Stream UND kein FDC) statt nach Zeit; Xorg-Bildschirmabschaltung (DPMS) wird beim Start abgeschaltet; Ausrichthilfen als Overlay (FDC-Haekchen oder F9 am Geraet) mit Rahmen, Ecken, Kantenmitten, Raster und Fadenkreuz; Leinwand kann mitdrehen (Haken im FDC): Panel-Rechtecke im gedrehten Raster einstellen",
+  "hinweis": "OTA setzt Dateirechte selbst: ueber HTTP kommen keine Modi mit, deshalb landete ein geaendertes Skript als 0644 im Ziel - nach dem naechsten Reboot scheiterte dann fdc-clock mit Permission denied",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -40,8 +40,8 @@
     },
     {
       "pfad": "tools/ota_update.py",
-      "sha256": "1886f9fb0cebf93400b4b4e0ac0b46f06d96b6cb34ff77ce72cd40f7ba9d7adb",
-      "bytes": 36476
+      "sha256": "23c728ba42c98b9717db600a39da2551bcba715135a56d34a16e9aba3d43c9cc",
+      "bytes": 37298
     },
     {
       "pfad": "tools/geraet_ident.py",

@@ -431,6 +431,16 @@ def installieren(manifest_url: str, ziel: str = STANDARD_ZIEL,
         _sperre_freigeben(sperre)
 
 
+def rechte_fuer(pfad: str) -> int:
+    """Dateimodus fuer ein aus dem OTA geladenes Ziel.
+
+    Der Transport ist HTTP, nicht tar — der Modus aus dem Quellbaum existiert am
+    Client nicht.  Skripte muessen ausfuehrbar ankommen (fdc-clock, fdc-ident,
+    firstboot laufen als Dienst), alles andere bleibt 0644.
+    """
+    return 0o755 if str(pfad).endswith(".sh") else 0o644
+
+
 def fehlende_dateien(ziel: str, manifest: dict) -> list:
     """Welche Dateien aus dem Manifest fehlen in der Installation?
 
@@ -525,6 +535,12 @@ def _installieren_gesperrt(manifest: dict, manifest_url: str, basis: str, ziel: 
             ziel_datei = staging / pfad
             ziel_datei.parent.mkdir(parents=True, exist_ok=True)
             ziel_datei.write_bytes(daten)
+            # Rechte explizit setzen: der OTA laedt ueber HTTP, Dateimodi kommen
+            # dabei nicht mit.  Ohne +x scheitert nach dem naechsten Boot jeder
+            # Skript-Dienst ("clock-fix.sh: Permission denied", real auf
+            # fdc-ecd476 nach dem Update passiert, 18.11.) — und zwar erst beim
+            # Reboot, also lange nach dem scheinbar erfolgreichen Update.
+            os.chmod(ziel_datei, rechte_fuer(pfad))
         (staging / "VERSION").write_text(str(manifest["version"]).strip() + "\n",
                                         encoding="utf-8")
     except Exception as exc:                                # noqa: BLE001
