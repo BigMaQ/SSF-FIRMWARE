@@ -1,7 +1,7 @@
 {
-  "version": "0.12.31",
+  "version": "0.12.32",
   "datum": "2026-11-18",
-  "hinweis": "OTA setzt Dateirechte selbst: ueber HTTP kommen keine Modi mit, deshalb landete ein geaendertes Skript als 0644 im Ziel - nach dem naechsten Reboot scheiterte dann fdc-clock mit Permission denied",
+  "hinweis": "Meldungen drehen mit: SYSTEMS UNAVAIL, Einrichtungs-Hinweis und Diag-Tafel wurden bisher waagerecht gezeichnet, obwohl das Bild gedreht war - auf einem gedreht eingestellten Panel (z.B. schief verbautes ECAM) lagen sie quer",
   "dateien": [
     {
       "pfad": "infra/__init__.py",
@@ -15,8 +15,8 @@
     },
     {
       "pfad": "tools/panel_viewer.py",
-      "sha256": "c788a67b764ed8c7a0d43c4975b77ebf73c0878325c5780c2909c90287e25483",
-      "bytes": 66931
+      "sha256": "fc3efa4f1d2b1951f576946c6e108b2c0112c723b8802c80a247c54818fec9b1",
+      "bytes": 68938
     },
     {
       "pfad": "tools/panel_agent.py",

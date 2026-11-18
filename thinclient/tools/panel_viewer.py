@@ -179,6 +179,29 @@ def _bild_gedreht_zeichnen(maler: QPainter, ziel: QRectF, pix,
     maler.restore()
 
 
+def _gedreht_zeichnen(maler: QPainter, ziel: QRectF, rotate: float, funktion) -> None:
+    """Inhalt in **derselben Drehung wie das Bild** zeichnen.
+
+    ``rotate`` gleicht ein schief/hochkant verbautes Panel aus.  Das Bild wurde
+    immer schon gedreht, die Meldungen nicht: auf einem gedreht eingestellten
+    Panel stand „SYSTEMS UNAVAIL" waagerecht, während die Instrumente lagen
+    (Feldbefund 18.11., ECAM).  ``funktion`` bekommt das zu benutzende Rechteck —
+    bei 90/270 sind Breite und Höhe getauscht, sonst klebt der Text am Rand.
+    """
+    grad = float(rotate or 0.0) % 360.0
+    flaeche = QRectF(ziel)
+    if abs(grad) < 0.01 or flaeche.width() <= 0 or flaeche.height() <= 0:
+        funktion(flaeche)
+        return
+    maler.save()
+    maler.translate(flaeche.center())
+    maler.rotate(grad)
+    innen_w, innen_h = (flaeche.height(), flaeche.width()) \
+        if int(round(grad)) % 180 else (flaeche.width(), flaeche.height())
+    funktion(QRectF(-innen_w / 2, -innen_h / 2, innen_w, innen_h))
+    maler.restore()
+
+
 class DiagFensterMixin:
     """Selbstauskunft (Diag-Tafel) und Bildschirmschoner — für beide Fensterarten.
 
@@ -416,10 +439,12 @@ class PanelFenster(DiagFensterMixin, QWidget):
         if hinweis:
             # Kein Netz: der Client wartet auf die WLAN-Einrichtung über das
             # Handy — die Anleitung ist wichtiger als „SYSTEMS UNAVAIL".
-            setup_zeichnen(maler, QRectF(self.rect()),
-                           str(hinweis.get("ssid") or ""),
-                           str(hinweis.get("url") or ""),
-                           str(hinweis.get("fehler") or ""))
+            _gedreht_zeichnen(maler, QRectF(self.rect()), self.rotate,
+                              lambda fl: setup_zeichnen(
+                                  maler, fl,
+                                  str(hinweis.get("ssid") or ""),
+                                  str(hinweis.get("url") or ""),
+                                  str(hinweis.get("fehler") or "")))
         elif meldung:
             # Erst prüfen, ob am Gerät selbst etwas kaputt ist (fehlendes Modul,
             # kein Schreibrecht, unplausible Uhr): dann zeigt der Bildschirm die
@@ -427,15 +452,19 @@ class PanelFenster(DiagFensterMixin, QWidget):
             # einzige Auskunft, die der Betreiber vor Ort bekommt.
             bericht = self.selbstauskunft()
             if bericht is not None and getattr(bericht, "fehler", False):
-                diag_splash_zeichnen(maler, QRectF(self.rect()), bericht,
-                                     panel_lang.sprache())
+                _gedreht_zeichnen(maler, QRectF(self.rect()), self.rotate,
+                                  lambda fl: diag_splash_zeichnen(
+                                      maler, fl, bericht, panel_lang.sprache()))
             else:
                 code = panel_lang.sprache()
-                unavail_zeichnen(maler, QRectF(self.rect()), self.panel_id,
-                                 self._kein_bild_sekunden(),
-                                 detail=panel_lang.text("keine_daten", code,
-                                                        panel=self.panel_id),
-                                 titel=panel_lang.text("unavail", code))
+                _gedreht_zeichnen(maler, QRectF(self.rect()), self.rotate,
+                                  lambda fl: unavail_zeichnen(
+                                      maler, fl, self.panel_id,
+                                      self._kein_bild_sekunden(),
+                                      detail=panel_lang.text(
+                                          "keine_daten", code,
+                                          panel=self.panel_id),
+                                      titel=panel_lang.text("unavail", code)))
                 if self.schoner_erlaubt():
                     self.dimmen(maler)
         elif self.diag and self.monitor is not None:
@@ -689,19 +718,30 @@ class CanvasFenster(DiagFensterMixin, QWidget):
                     ausricht_zeichnen(maler, QRectF(*teil["rect"]), str(panel_id),
                                       raster=False, mitte=True)
             elif not self._testbetrieb:
+                # Meldungen drehen wie das Bild des Teils mit (bei mitdrehender
+                # Leinwand ist teil["rotate"] 0 — die Leinwand hat schon gedreht).
+                teil_grad = teil.get("rotate", self.rotate)
                 if hinweis:
-                    setup_zeichnen(maler, QRectF(*teil["rect"]),
-                                   str(hinweis.get("ssid") or ""),
-                                   str(hinweis.get("url") or ""),
-                                   str(hinweis.get("fehler") or ""))
+                    _gedreht_zeichnen(
+                        maler, QRectF(*teil["rect"]), teil_grad,
+                        lambda fl: setup_zeichnen(
+                            maler, fl,
+                            str(hinweis.get("ssid") or ""),
+                            str(hinweis.get("url") or ""),
+                            str(hinweis.get("fehler") or "")))
                 else:
                     bericht = self.selbstauskunft()
                     if bericht is not None and getattr(bericht, "fehler", False):
-                        diag_splash_zeichnen(maler, QRectF(*teil["rect"]), bericht,
-                                             panel_lang.sprache())
+                        _gedreht_zeichnen(
+                            maler, QRectF(*teil["rect"]), teil_grad,
+                            lambda fl: diag_splash_zeichnen(
+                                maler, fl, bericht, panel_lang.sprache()))
                     else:
-                        unavail_zeichnen(maler, QRectF(*teil["rect"]), panel_id,
-                                         self.keine_bild_sekunden(panel_id))
+                        _gedreht_zeichnen(
+                            maler, QRectF(*teil["rect"]), teil_grad,
+                            lambda fl: unavail_zeichnen(
+                                maler, fl, panel_id,
+                                self.keine_bild_sekunden(panel_id)))
             # Fuge zwischen den Teilen sichtbar machen
             maler.setPen(QPen(QColor(28, 38, 48), 3))
             maler.setBrush(Qt.NoBrush)
